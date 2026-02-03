@@ -45,6 +45,11 @@ public class SportsScorer
     private static readonly Regex ArchivedYearPattern = new(@"\((19[89]\d|20[0-2]\d)\)\s*$", RegexOptions.Compiled);
     // "Next game:" placeholder programs
     private static readonly Regex PlaceholderPattern = new(@"^Next\s+game:", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Highlights and mini shows - not actual games
+    private static readonly Regex HighlightsPattern = new(@"\b(mini|highlights?|\bhl\b|recap|review|round-?up|best\s+of|top\s+\d+)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Past season format - NOT current season. Current season (25/26) should NOT be flagged.
+    // Only flag clearly past seasons like 23/24, 22/23, etc.
+    private static readonly Regex PastSeasonPattern = new(@"\b(1[89]|20|21|22|23|24)[/-](1[89]|20|21|22|23|24|25)\s*:", RegexOptions.Compiled);
     private static readonly Regex NonSportsPattern = new(@"\b(news|weather|forecast|talk\s*show|documentary|movie|film)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex PregamePattern = new(@"\b(pregame|postgame|halftime|preview|highlights|analysis|studio|report)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     
@@ -248,6 +253,21 @@ public class SportsScorer
 
         // Negative signals - Replay/Archive detection
         if (ReplayPattern.IsMatch(title) || YearPrefixPattern.IsMatch(title) || ArchivedYearPattern.IsMatch(title))
+        {
+            score += PENALTY_REPLAY;
+            result.IsReplay = true;
+        }
+        
+        // Highlights, minis, recaps - NOT actual games
+        if (HighlightsPattern.IsMatch(title))
+        {
+            score += PENALTY_REPLAY;
+            result.IsReplay = true;
+        }
+        
+        // Past season format indicates replay: "NBA 23/24: Team v Team"
+        // Current season (25/26) is NOT penalized
+        if (PastSeasonPattern.IsMatch(title))
         {
             score += PENALTY_REPLAY;
             result.IsReplay = true;
