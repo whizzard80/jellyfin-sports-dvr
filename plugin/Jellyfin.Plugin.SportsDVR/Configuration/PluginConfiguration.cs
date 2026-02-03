@@ -1,3 +1,6 @@
+using System.Collections.Generic;
+using Jellyfin.Plugin.SportsDVR.Models;
+using Jellyfin.Plugin.SportsDVR.Services;
 using MediaBrowser.Model.Plugins;
 
 namespace Jellyfin.Plugin.SportsDVR.Configuration;
@@ -12,47 +15,49 @@ public class PluginConfiguration : BasePluginConfiguration
     /// </summary>
     public PluginConfiguration()
     {
-        RecordingServiceUrl = "http://localhost:8765";
-        SportsLibraryPath = "/media/sports";
-        RetentionDays = 3;
         MaxConcurrentRecordings = 2;
-        EnableTimeShift = true;
-        TeamarrUrl = string.Empty;
-        DispatcharrUrl = string.Empty;
+        DefaultPriority = 50;
+        Subscriptions = new List<Subscription>();
+        CustomAliases = new List<CustomTeamAlias>();
+        EnableAutoScheduling = true;
+        EnableAliasMatching = true;
+        ScanIntervalMinutes = 5;
     }
 
     /// <summary>
-    /// Gets or sets the URL of the recording service API.
-    /// </summary>
-    public string RecordingServiceUrl { get; set; }
-
-    /// <summary>
-    /// Gets or sets the path where sports recordings are stored.
-    /// </summary>
-    public string SportsLibraryPath { get; set; }
-
-    /// <summary>
-    /// Gets or sets the number of days to retain recordings before cleanup.
-    /// </summary>
-    public int RetentionDays { get; set; }
-
-    /// <summary>
     /// Gets or sets the maximum number of concurrent recordings.
+    /// Limited by tuner/IPTV connection count.
     /// </summary>
     public int MaxConcurrentRecordings { get; set; }
 
     /// <summary>
-    /// Gets or sets a value indicating whether time-shifting is enabled.
+    /// Gets or sets the default priority for new subscriptions (1-100).
     /// </summary>
-    public bool EnableTimeShift { get; set; }
+    public int DefaultPriority { get; set; }
 
     /// <summary>
-    /// Gets or sets the Teamarr API URL for EPG data.
+    /// Gets or sets whether auto-scheduling from EPG is enabled.
     /// </summary>
-    public string TeamarrUrl { get; set; }
+    public bool EnableAutoScheduling { get; set; }
 
     /// <summary>
-    /// Gets or sets the Dispatcharr API URL for stream data.
+    /// Gets or sets how often to scan EPG for matching programs (minutes).
     /// </summary>
-    public string DispatcharrUrl { get; set; }
+    public int ScanIntervalMinutes { get; set; }
+
+    /// <summary>
+    /// Gets or sets the list of subscriptions.
+    /// </summary>
+    public List<Subscription> Subscriptions { get; set; }
+
+    /// <summary>
+    /// Gets or sets custom team aliases defined by the user.
+    /// </summary>
+    public List<CustomTeamAlias> CustomAliases { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether to use alias matching for team names.
+    /// When true, "Man City" will match a "Manchester City" subscription.
+    /// </summary>
+    public bool EnableAliasMatching { get; set; }
 }

@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Sports DVR</title>
+    <style>
+        .sportsdvr-container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1em;
+        }
+        
+        .sportsdvr-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5em;
+            margin-bottom: 1.5em;
+        }
+        
+        .sportsdvr-header h1 {
+            margin: 0;
+            font-size: 1.8em;
+        }
+        
+        .sportsdvr-section {
+            background: var(--theme-card-background, rgba(0,0,0,0.3));
+            border-radius: 8px;
+            padding: 1.2em;
+            margin-bottom: 1.5em;
+        }
+        
+        .sportsdvr-section h2 {
+            margin: 0 0 1em 0;
+            font-size: 1.2em;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 0.5em;
+        }
+        
+        .sportsdvr-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1em;
+        }
+        
+        .sportsdvr-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3em;
+        }
+        
+        .sportsdvr-field label {
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        
+        .sportsdvr-field input,
+        .sportsdvr-field select {
+            padding: 0.6em;
+            border-radius: 4px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.3);
+            color: inherit;
+            font-size: 1em;
+        }
+        
+        .sportsdvr-subscription-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.8em;
+        }
+        
+        .sportsdvr-subscription {
+            display: flex;
+            align-items: center;
+            gap: 1em;
+            padding: 1em;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+            border-left: 4px solid var(--theme-accent, #00a4dc);
+        }
+        
+        .sportsdvr-subscription.disabled {
+            opacity: 0.5;
+        }
+        
+        .sportsdvr-subscription-icon {
+            font-size: 1.5em;
+            width: 2em;
+            text-align: center;
+        }
+        
+        .sportsdvr-subscription-info {
+            flex: 1;
+        }
+        
+        .sportsdvr-subscription-name {
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+        
+        .sportsdvr-subscription-meta {
+            font-size: 0.85em;
+            opacity: 0.7;
+            margin-top: 0.2em;
+        }
+        
+        .sportsdvr-subscription-badges {
+            display: flex;
+            gap: 0.4em;
+            margin-top: 0.3em;
+        }
+        
+        .sportsdvr-badge {
+            font-size: 0.75em;
+            padding: 0.2em 0.5em;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .sportsdvr-badge.priority-high {
+            background: rgba(76, 175, 80, 0.3);
+        }
+        
+        .sportsdvr-subscription-actions {
+            display: flex;
+            gap: 0.5em;
+        }
+        
+        .sportsdvr-btn {
+            padding: 0.5em 1em;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: opacity 0.2s;
+        }
+        
+        .sportsdvr-btn:hover {
+            opacity: 0.8;
+        }
+        
+        .sportsdvr-btn-primary {
+            background: var(--theme-accent, #00a4dc);
+            color: white;
+        }
+        
+        .sportsdvr-btn-secondary {
+            background: rgba(255,255,255,0.1);
+            color: inherit;
+        }
+        
+        .sportsdvr-btn-danger {
+            background: rgba(244, 67, 54, 0.8);
+            color: white;
+        }
+        
+        .sportsdvr-empty {
+            text-align: center;
+            padding: 2em;
+            opacity: 0.6;
+        }
+        
+        .sportsdvr-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 1em;
+            text-align: center;
+        }
+        
+        .sportsdvr-stat {
+            padding: 1em;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+        }
+        
+        .sportsdvr-stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: var(--theme-accent, #00a4dc);
+        }
+        
+        .sportsdvr-stat-label {
+            font-size: 0.85em;
+            opacity: 0.7;
+        }
+        
+        .sportsdvr-form-group {
+            margin-bottom: 1em;
+        }
+        
+        .sportsdvr-form-group label {
+            display: block;
+            margin-bottom: 0.3em;
+            font-size: 0.9em;
+        }
+        
+        .sportsdvr-form-group input,
+        .sportsdvr-form-group select {
+            width: 100%;
+            padding: 0.6em;
+            border-radius: 4px;
+            border: 1px solid rgba(255,255,255,0.2);
+            background: rgba(0,0,0,0.3);
+            color: inherit;
+            box-sizing: border-box;
+        }
+        
+        .sportsdvr-form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1em;
+        }
+        
+        .sportsdvr-checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5em;
+        }
+        
+        .sportsdvr-checkbox-group input {
+            width: auto;
+        }
+        
+        .sportsdvr-form-help {
+            font-size: 0.8em;
+            opacity: 0.6;
+            margin-top: 0.3em;
+        }
+    </style>
+</head>
+<body>
+    <div id="SportsDVRConfigPage" data-role="page" class="page type-interior pluginConfigurationPage"
+         data-require="emby-input,emby-button,emby-select,emby-checkbox">
+        
+        <div data-role="content">
+            <div class="content-primary">
+                <div class="sportsdvr-container">
+                    
+                    <div class="sportsdvr-header">
+                        <span style="font-size: 2em;">⚽</span>
+                        <h1>Sports DVR</h1>
+                    </div>
+                    
+                    <!-- Status Overview -->
+                    <div class="sportsdvr-section">
+                        <h2>📊 Overview</h2>
+                        <div class="sportsdvr-stats" id="statsContainer">
+                            <div class="sportsdvr-stat">
+                                <div class="sportsdvr-stat-value" id="statSubscriptions">0</div>
+                                <div class="sportsdvr-stat-label">Subscriptions</div>
+                            </div>
+                            <div class="sportsdvr-stat">
+                                <div class="sportsdvr-stat-value" id="statEnabled">0</div>
+                                <div class="sportsdvr-stat-label">Active</div>
+                            </div>
+                            <div class="sportsdvr-stat">
+                                <div class="sportsdvr-stat-value" id="statConcurrent">2</div>
+                                <div class="sportsdvr-stat-label">Max Streams</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Settings -->
+                    <div class="sportsdvr-section">
+                        <h2>⚙️ Settings</h2>
+                        <p style="opacity: 0.7; margin-bottom: 1em;">
+                            Recording paths and storage are managed by Jellyfin's DVR settings.
+                        </p>
+                        <form id="settingsForm">
+                            <div class="sportsdvr-grid">
+                                <div class="sportsdvr-field">
+                                    <label for="maxConcurrent">Max Concurrent Recordings</label>
+                                    <input type="number" id="maxConcurrent" min="1" max="10" value="2">
+                                    <div class="sportsdvr-form-help">
+                                        Number of tuners/streams available (e.g., 2 for most IPTV)
+                                    </div>
+                                </div>
+                                <div class="sportsdvr-field">
+                                    <label for="defaultPriority">Default Priority (1-100)</label>
+                                    <input type="number" id="defaultPriority" min="1" max="100" value="50">
+                                </div>
+                                <div class="sportsdvr-field">
+                                    <label for="scanInterval">EPG Scan Interval (minutes)</label>
+                                    <input type="number" id="scanInterval" min="1" max="60" value="5">
+                                </div>
+                            </div>
+                            <div style="margin-top: 1em;">
+                                <label class="sportsdvr-checkbox-group">
+                                    <input type="checkbox" id="enableAutoScheduling" checked>
+                                    <span>Enable automatic scheduling from EPG</span>
+                                </label>
+                            </div>
+                            <div style="margin-top: 0.5em;">
+                                <label class="sportsdvr-checkbox-group">
+                                    <input type="checkbox" id="enableAliasMatching" checked>
+                                    <span>Enable team alias matching (Man City = Manchester City)</span>
+                                </label>
+                            </div>
+                            <div style="margin-top: 1em;">
+                                <button type="submit" class="sportsdvr-btn sportsdvr-btn-primary">
+                                    Save Settings
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                    
+                    <!-- Custom Aliases -->
+                    <div class="sportsdvr-section">
+                        <h2>🏷️ Team Aliases</h2>
+                        <p style="opacity: 0.7; margin-bottom: 1em;">
+                            Add custom team name variations. Built-in aliases include common variations like "Man City" → "Manchester City".
+                        </p>
+                        <div id="aliasTest" style="margin-bottom: 1em;">
+                            <label for="aliasTestInput" style="display: block; margin-bottom: 0.3em; opacity: 0.8;">Test Alias Lookup</label>
+                            <div style="display: flex; gap: 0.5em;">
+                                <input type="text" id="aliasTestInput" placeholder="Enter team name..." style="flex: 1; padding: 0.6em; border-radius: 4px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: inherit;">
+                                <button class="sportsdvr-btn" onclick="SportsDVR.testAlias()">Lookup</button>
+                            </div>
+                            <div id="aliasTestResult" style="margin-top: 0.5em; padding: 0.8em; background: rgba(0,0,0,0.2); border-radius: 4px; display: none;">
+                            </div>
+                        </div>
+                        <h3 style="margin-top: 1.5em; font-size: 1em;">Custom Aliases</h3>
+                        <div id="customAliasesList" style="display: flex; flex-direction: column; gap: 0.5em; margin-bottom: 1em;">
+                            <div class="sportsdvr-empty">No custom aliases defined</div>
+                        </div>
+                        <button class="sportsdvr-btn" onclick="SportsDVR.openAliasModal()">
+                            + Add Custom Alias
+                        </button>
+                    </div>
+                    
+                    <!-- Subscriptions -->
+                    <div class="sportsdvr-section">
+                        <h2>📺 Your Subscriptions</h2>
+                        <div id="subscriptionsList" class="sportsdvr-subscription-list">
+                            <div class="sportsdvr-empty">
+                                Loading subscriptions...
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Add/Edit Subscription Form -->
+                    <div class="sportsdvr-section">
+                        <h2 id="modalTitle">➕ Add Subscription</h2>
+                        <form id="subscriptionForm">
+                            <input type="hidden" id="editId">
+                            
+                            <div class="sportsdvr-form-group">
+                                <label for="subName">Name</label>
+                                <input type="text" id="subName" placeholder="e.g., Lakers, UFC, Premier League" required>
+                            </div>
+                            
+                            <div class="sportsdvr-form-group">
+                                <label for="subType">Type</label>
+                                <select id="subType">
+                                    <option value="0">Team (requires vs/@ in title)</option>
+                                    <option value="1">League (e.g., NBA, NFL)</option>
+                                    <option value="2">Event Series (e.g., UFC, WWE)</option>
+                                </select>
+                            </div>
+                            
+                            <div class="sportsdvr-form-group">
+                                <label for="subPattern">Match Pattern</label>
+                                <input type="text" id="subPattern" placeholder="lakers or /la lakers|los angeles/i">
+                                <div class="sportsdvr-form-help">
+                                    Simple text or regex (e.g., /pattern/i for case-insensitive)
+                                </div>
+                            </div>
+                            
+                            <div class="sportsdvr-form-group">
+                                <label for="subExclude">Exclude Patterns (comma-separated)</label>
+                                <input type="text" id="subExclude" placeholder="countdown, preview">
+                                <div class="sportsdvr-form-help">
+                                    Won't record if these words appear (e.g., "UFC Countdown")
+                                </div>
+                            </div>
+                            
+                            <div class="sportsdvr-form-group">
+                                <label for="subPriority">Priority (1-100)</label>
+                                <input type="number" id="subPriority" min="1" max="100" value="50">
+                                <div class="sportsdvr-form-help">
+                                    Higher priority wins when games conflict
+                                </div>
+                            </div>
+                            
+                            <div class="sportsdvr-form-group">
+                                <label class="sportsdvr-checkbox-group">
+                                    <input type="checkbox" id="subReplays">
+                                    <span>Include replays/encores/classics</span>
+                                </label>
+                            </div>
+                            
+                            <div style="display: flex; gap: 0.5em; margin-top: 1em;">
+                                <button type="button" class="sportsdvr-btn sportsdvr-btn-secondary" onclick="SportsDVR.clearForm()">
+                                    Clear
+                                </button>
+                                <button type="submit" class="sportsdvr-btn sportsdvr-btn-primary">
+                                    Save Subscription
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+            const SportsDVR = {
+                getApiUrl(path) {
+                    return ApiClient.getUrl('SportsDVR' + (path ? '/' + path : ''));
+                },
+                
+                initialized: false,
+                
+                async init() {
+                    if (this.initialized) {
+                        return;
+                    }
+                    this.initialized = true;
+                    
+                    await this.loadSettings();
+                    await this.loadSubscriptions();
+                    await this.loadStatus();
+                    await this.loadCustomAliases();
+                    
+                    document.getElementById('settingsForm').addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        this.saveSettings();
+                    });
+                    
+                    document.getElementById('subscriptionForm').addEventListener('submit', (e) => {
+                        e.preventDefault();
+                        this.saveSubscription();
+                    });
+                },
+                
+                async loadSettings() {
+                    try {
+                        const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
+                        document.getElementById('maxConcurrent').value = config.MaxConcurrentRecordings || 2;
+                        document.getElementById('defaultPriority').value = config.DefaultPriority || 50;
+                        document.getElementById('scanInterval').value = config.ScanIntervalMinutes || 5;
+                        document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
+                        document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
+                        await this.loadCustomAliases();
+                    } catch (e) {
+                        console.error('Failed to load settings:', e);
+                    }
+                },
+                
+                async saveSettings() {
+                    try {
+                        const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
+                        config.MaxConcurrentRecordings = parseInt(document.getElementById('maxConcurrent').value);
+                        config.DefaultPriority = parseInt(document.getElementById('defaultPriority').value);
+                        config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);
+                        config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
+                        config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
+                        
+                        await ApiClient.updatePluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890', config);
+                        Dashboard.alert('Settings saved!');
+                    } catch (e) {
+                        console.error('Failed to save settings:', e);
+                        Dashboard.alert('Failed to save settings');
+                    }
+                },
+                
+                async loadStatus() {
+                    try {
+                        const status = await ApiClient.ajax({
+                            url: this.getApiUrl('Status'),
+                            type: 'GET',
+                            dataType: 'json'
+                        });
+                        document.getElementById('statSubscriptions').textContent = status.TotalSubscriptions || 0;
+                        document.getElementById('statEnabled').textContent = status.EnabledSubscriptions || 0;
+                        document.getElementById('statConcurrent').textContent = status.MaxConcurrentRecordings || 2;
+                    } catch (e) {
+                        console.error('Failed to load status:', e);
+                    }
+                },
+                
+                async loadSubscriptions() {
+                    const container = document.getElementById('subscriptionsList');
+                    try {
+                        const subscriptions = await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions'),
+                            type: 'GET',
+                            dataType: 'json'
+                        });
+                        
+                        if (subscriptions.length === 0) {
+                            container.innerHTML = '<div class="sportsdvr-empty">No subscriptions yet</div>';
+                            return;
+                        }
+                        
+                        container.innerHTML = subscriptions.map(sub => this.renderSubscription(sub)).join('');
+                    } catch (e) {
+                        console.error('Failed to load subscriptions:', e);
+                        container.innerHTML = '<div class="sportsdvr-empty">Failed to load subscriptions</div>';
+                    }
+                },
+                
+                renderSubscription(sub) {
+                    const typeMap = {
+                        0: { icon: '🏀', name: 'Team' },
+                        1: { icon: '🏆', name: 'League' },
+                        2: { icon: '🎯', name: 'Event' },
+                        'Team': { icon: '🏀', name: 'Team' },
+                        'League': { icon: '🏆', name: 'League' },
+                        'Event': { icon: '🎯', name: 'Event' }
+                    };
+                    const typeInfo = typeMap[sub.type] || { icon: '📺', name: 'Unknown' };
+                    const icon = typeInfo.icon;
+                    const typeName = typeInfo.name;
+                    
+                    let classStr = 'sportsdvr-subscription';
+                    if (!sub.enabled) classStr += ' disabled';
+                    
+                    const badges = [];
+                    if (sub.priority >= 70) badges.push('<span class="sportsdvr-badge priority-high">High Priority</span>');
+                    if (sub.includeReplays) badges.push('<span class="sportsdvr-badge">+Replays</span>');
+                    
+                    const enabledText = sub.enabled ? 'Disable' : 'Enable';
+                    const badgesHtml = badges.length > 0 ? '<div class="sportsdvr-subscription-badges">' + badges.join('') + '</div>' : '';
+                    
+                    return '<div class="' + classStr + '" data-id="' + this.escapeHtml(sub.id) + '">' +
+                        '<div class="sportsdvr-subscription-icon">' + icon + '</div>' +
+                        '<div class="sportsdvr-subscription-info">' +
+                        '<div class="sportsdvr-subscription-name">' + this.escapeHtml(sub.name) + '</div>' +
+                        '<div class="sportsdvr-subscription-meta">' +
+                        typeName + ' · Pattern: ' + this.escapeHtml(sub.matchPattern) + ' · Priority: ' + sub.priority +
+                        '</div>' +
+                        badgesHtml +
+                        '</div>' +
+                        '<div class="sportsdvr-subscription-actions">' +
+                        '<button class="sportsdvr-btn sportsdvr-btn-secondary" onclick="SportsDVR.editSubscription(\'' + this.escapeHtml(sub.id) + '\')">Edit</button>' +
+                        '<button class="sportsdvr-btn sportsdvr-btn-secondary" onclick="SportsDVR.toggleSubscription(\'' + this.escapeHtml(sub.id) + '\', ' + (!sub.enabled) + ')">' + enabledText + '</button>' +
+                        '<button class="sportsdvr-btn sportsdvr-btn-danger" onclick="SportsDVR.deleteSubscription(\'' + this.escapeHtml(sub.id) + '\')">Delete</button>' +
+                        '</div>' +
+                        '</div>';
+                },
+                
+                clearForm() {
+                    document.getElementById('modalTitle').textContent = '➕ Add Subscription';
+                    document.getElementById('editId').value = '';
+                    document.getElementById('subName').value = '';
+                    document.getElementById('subType').value = '0';
+                    document.getElementById('subPattern').value = '';
+                    document.getElementById('subExclude').value = '';
+                    document.getElementById('subPriority').value = document.getElementById('defaultPriority')?.value || '50';
+                    document.getElementById('subReplays').checked = false;
+                    document.getElementById('subName').focus();
+                },
+                
+                async editSubscription(id) {
+                    try {
+                        const sub = await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions/' + id),
+                            type: 'GET',
+                            dataType: 'json'
+                        });
+                        
+                        document.getElementById('modalTitle').textContent = '✏️ Edit Subscription';
+                        document.getElementById('editId').value = sub.id;
+                        document.getElementById('subName').value = sub.name;
+                        document.getElementById('subType').value = sub.type;
+                        document.getElementById('subPattern').value = sub.matchPattern;
+                        document.getElementById('subExclude').value = (sub.excludePatterns || []).join(', ');
+                        document.getElementById('subPriority').value = sub.priority;
+                        document.getElementById('subReplays').checked = sub.includeReplays;
+                        
+                        document.getElementById('subscriptionForm').scrollIntoView({ behavior: 'smooth' });
+                    } catch (e) {
+                        console.error('Failed to load subscription:', e);
+                        Dashboard.alert('Failed to load subscription');
+                    }
+                },
+                
+                async saveSubscription() {
+                    const id = document.getElementById('editId').value;
+                    const excludeText = document.getElementById('subExclude').value;
+                    const excludePatterns = excludeText ? excludeText.split(',').map(s => s.trim()).filter(s => s) : [];
+                    
+                    const data = {
+                        name: document.getElementById('subName').value,
+                        type: parseInt(document.getElementById('subType').value),
+                        matchPattern: document.getElementById('subPattern').value || document.getElementById('subName').value.toLowerCase(),
+                        excludePatterns: excludePatterns,
+                        priority: parseInt(document.getElementById('subPriority').value),
+                        includeReplays: document.getElementById('subReplays').checked,
+                        enabled: true
+                    };
+                    
+                    try {
+                        if (id) {
+                            await ApiClient.ajax({
+                                url: this.getApiUrl('Subscriptions/' + id),
+                                type: 'PUT',
+                                data: JSON.stringify(data),
+                                contentType: 'application/json'
+                            });
+                        } else {
+                            await ApiClient.ajax({
+                                url: this.getApiUrl('Subscriptions'),
+                                type: 'POST',
+                                data: JSON.stringify(data),
+                                contentType: 'application/json'
+                            });
+                        }
+                        this.clearForm();
+                        await this.loadSubscriptions();
+                        await this.loadStatus();
+                        Dashboard.alert('Subscription saved!');
+                        document.getElementById('subscriptionsList').scrollIntoView({ behavior: 'smooth' });
+                    } catch (e) {
+                        console.error('Failed to save subscription:', e);
+                        Dashboard.alert('Failed to save subscription');
+                    }
+                },
+                
+                async toggleSubscription(id, enabled) {
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions/' + id + '/Toggle?enabled=' + enabled),
+                            type: 'POST'
+                        });
+                        await this.loadSubscriptions();
+                        await this.loadStatus();
+                    } catch (e) {
+                        console.error('Failed to toggle subscription:', e);
+                        Dashboard.alert('Failed to toggle subscription');
+                    }
+                },
+                
+                async deleteSubscription(id) {
+                    if (!confirm('Are you sure you want to delete this subscription?')) {
+                        return;
+                    }
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions/' + id),
+                            type: 'DELETE'
+                        });
+                        await this.loadSubscriptions();
+                        await this.loadStatus();
+                        Dashboard.alert('Subscription deleted');
+                    } catch (e) {
+                        console.error('Failed to delete subscription:', e);
+                        Dashboard.alert('Failed to delete subscription');
+                    }
+                },
+                
+                // ========== ALIAS FUNCTIONS ==========
+                
+                async testAlias() {
+                    const input = document.getElementById('aliasTestInput').value.trim();
+                    if (!input) {
+                        return;
+                    }
+                    
+                    const resultDiv = document.getElementById('aliasTestResult');
+                    resultDiv.style.display = 'block';
+                    resultDiv.innerHTML = 'Looking up...';
+                    
+                    try {
+                        const data = await ApiClient.ajax({
+                            url: this.getApiUrl('Aliases/' + encodeURIComponent(input)),
+                            type: 'GET',
+                            dataType: 'json'
+                        });
+                        
+                        const aliasesStr = data.Aliases.map(a => this.escapeHtml(a)).join(', ');
+                        resultDiv.innerHTML = 
+                            '<div><strong>Canonical Name:</strong> ' + this.escapeHtml(data.CanonicalName) + '</div>' +
+                            '<div><strong>All Aliases:</strong> ' + aliasesStr + '</div>' +
+                            '<div style="margin-top: 0.5em; font-family: monospace; font-size: 0.85em; word-break: break-all;">' +
+                            '<strong>Pattern:</strong> ' + this.escapeHtml(data.SuggestedPattern) +
+                            '</div>';
+                    } catch (e) {
+                        console.error('Alias lookup failed:', e);
+                        resultDiv.innerHTML = '<span style="color: #ff6b6b;">Lookup failed</span>';
+                    }
+                },
+                
+                async loadCustomAliases() {
+                    const container = document.getElementById('customAliasesList');
+                    try {
+                        const aliases = await ApiClient.ajax({
+                            url: this.getApiUrl('Aliases/Custom'),
+                            type: 'GET',
+                            dataType: 'json'
+                        }) || [];
+                        
+                        if (aliases.length === 0) {
+                            container.innerHTML = '<div class="sportsdvr-empty">No custom aliases defined</div>';
+                            return;
+                        }
+                        
+                        container.innerHTML = aliases.map(alias => {
+                            const aliasesStr = alias.Aliases.map(a => this.escapeHtml(a)).join(', ');
+                            const canonicalEscaped = this.escapeHtml(alias.CanonicalName);
+                            return '<div style="display: flex; align-items: center; gap: 1em; padding: 0.6em; background: rgba(0,0,0,0.2); border-radius: 4px;">' +
+                                '<div style="flex: 1;">' +
+                                '<strong>' + canonicalEscaped + '</strong>' +
+                                '<span style="opacity: 0.7;">= ' + aliasesStr + '</span>' +
+                                '</div>' +
+                                '<button class="sportsdvr-btn sportsdvr-btn-danger" onclick="SportsDVR.deleteCustomAlias(\'' + canonicalEscaped + '\')" style="padding: 0.3em 0.6em; font-size: 0.9em;">×</button>' +
+                                '</div>';
+                        }).join('');
+                    } catch (e) {
+                        console.error('Failed to load custom aliases:', e);
+                        container.innerHTML = '<div class="sportsdvr-empty">Failed to load aliases</div>';
+                    }
+                },
+                
+                openAliasModal() {
+                    const html = '<div class="sportsdvr-modal-overlay" id="aliasModal" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 1000; display: flex; align-items: center; justify-content: center;">' +
+                        '<div style="background: var(--theme-card-background, #1a1a1a); border-radius: 8px; padding: 1.5em; max-width: 500px; width: 90%;">' +
+                        '<h3 style="margin: 0 0 1em 0;">Add Custom Alias</h3>' +
+                        '<form id="aliasForm" onsubmit="SportsDVR.saveCustomAlias(); return false;">' +
+                        '<div class="sportsdvr-field" style="margin-bottom: 1em;">' +
+                        '<label for="aliasCanonical">Canonical Name (official team name)</label>' +
+                        '<input type="text" id="aliasCanonical" placeholder="e.g., Manchester City" required>' +
+                        '</div>' +
+                        '<div class="sportsdvr-field" style="margin-bottom: 1em;">' +
+                        '<label for="aliasVariants">Aliases (comma-separated)</label>' +
+                        '<input type="text" id="aliasVariants" placeholder="e.g., Man City, MCFC, Citizens" required>' +
+                        '</div>' +
+                        '<div style="display: flex; gap: 0.5em; justify-content: flex-end; margin-top: 1.5em;">' +
+                        '<button type="button" class="sportsdvr-btn sportsdvr-btn-secondary" onclick="SportsDVR.closeAliasModal()">Cancel</button>' +
+                        '<button type="submit" class="sportsdvr-btn sportsdvr-btn-primary">Add Alias</button>' +
+                        '</div>' +
+                        '</form>' +
+                        '</div>' +
+                        '</div>';
+                    document.body.insertAdjacentHTML('beforeend', html);
+                },
+                
+                closeAliasModal() {
+                    const modal = document.getElementById('aliasModal');
+                    if (modal) {
+                        modal.remove();
+                    }
+                },
+                
+                async saveCustomAlias() {
+                    const canonical = document.getElementById('aliasCanonical').value.trim();
+                    const variants = document.getElementById('aliasVariants').value.split(',').map(v => v.trim()).filter(v => v);
+                    
+                    if (!canonical || variants.length === 0) {
+                        Dashboard.alert('Please fill in all fields');
+                        return;
+                    }
+                    
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Aliases/Custom'),
+                            type: 'POST',
+                            data: JSON.stringify({
+                                CanonicalName: canonical,
+                                Aliases: variants
+                            }),
+                            contentType: 'application/json'
+                        });
+                        this.closeAliasModal();
+                        await this.loadCustomAliases();
+                        Dashboard.alert('Alias added!');
+                    } catch (e) {
+                        console.error('Failed to add alias:', e);
+                        Dashboard.alert('Failed to add alias');
+                    }
+                },
+                
+                async deleteCustomAlias(canonicalName) {
+                    if (!confirm('Delete alias for "' + canonicalName + '"?')) {
+                        return;
+                    }
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Aliases/Custom/' + encodeURIComponent(canonicalName)),
+                            type: 'DELETE'
+                        });
+                        await this.loadCustomAliases();
+                        Dashboard.alert('Alias deleted');
+                    } catch (e) {
+                        console.error('Failed to delete alias:', e);
+                        Dashboard.alert('Failed to delete alias');
+                    }
+                },
+                
+                escapeHtml(text) {
+                    const div = document.createElement('div');
+                    div.textContent = text;
+                    return div.innerHTML;
+                }
+            };
+            
+            SportsDVR.init();
+        </script>
+    </div>
+</body>
+</html>
