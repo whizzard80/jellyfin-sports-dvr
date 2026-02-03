@@ -118,24 +118,24 @@
                         
                         <div class="inputContainer">
                             <label class="inputLabel" for="subName">Name</label>
-                            <input type="text" id="subName" placeholder="e.g., Lakers, UFC, Premier League" is="emby-input" required>
+                            <input type="text" id="subName" placeholder="e.g., Lakers, UFC, Premier League" is="emby-input" required oninput="SportsDVR.updatePatternHint()">
                             <div class="fieldDescription">The team, league, or event name to subscribe to.</div>
                         </div>
                         
                         <div class="selectContainer">
                             <label class="selectLabel" for="subType">Type</label>
-                            <select id="subType" is="emby-select">
+                            <select id="subType" is="emby-select" onchange="SportsDVR.updatePatternHint()">
                                 <option value="0">Team (requires vs/@ in title)</option>
-                                <option value="1">League (e.g., NBA, NFL)</option>
-                                <option value="2">Event Series (e.g., UFC, WWE)</option>
+                                <option value="1">League (matches any program)</option>
+                                <option value="2">Event Series (matches any program)</option>
                             </select>
-                            <div class="fieldDescription">Team subscriptions only match games (vs/@). League/Event match any program with the name.</div>
+                            <div class="fieldDescription">Team subscriptions only match games (vs/@). League/Event match any live program with the name.</div>
                         </div>
                         
                         <div class="inputContainer">
                             <label class="inputLabel" for="subPattern">Match Pattern (optional)</label>
-                            <input type="text" id="subPattern" placeholder="lakers or /la lakers|los angeles/i" is="emby-input">
-                            <div class="fieldDescription">Custom pattern to match. Leave blank to use the name. Supports regex with /pattern/i syntax.</div>
+                            <input type="text" id="subPattern" placeholder="Leave blank to match by name" is="emby-input">
+                            <div id="patternHint" class="fieldDescription">Leave blank to match any program containing the name. For custom matching, use text or regex: /pattern/i</div>
                         </div>
                         
                         <div class="inputContainer">
@@ -291,6 +291,29 @@
                     document.getElementById('subExclude').value = '';
                     document.getElementById('subPriority').value = document.getElementById('defaultPriority').value || '50';
                     document.getElementById('subReplays').checked = false;
+                    this.updatePatternHint();
+                },
+                
+                updatePatternHint() {
+                    const name = document.getElementById('subName').value.trim();
+                    const type = document.getElementById('subType').value;
+                    const patternInput = document.getElementById('subPattern');
+                    const hint = document.getElementById('patternHint');
+                    
+                    const typeNames = ['Team', 'League', 'Event'];
+                    const typeName = typeNames[parseInt(type)] || 'subscription';
+                    
+                    if (name) {
+                        patternInput.placeholder = 'Will match: ' + name.toLowerCase();
+                        if (type === '0') {
+                            hint.textContent = 'Leave blank to match "' + name + '" in game titles (with vs/@). Custom pattern overrides.';
+                        } else {
+                            hint.textContent = 'Leave blank to match any live program containing "' + name + '". Custom pattern overrides.';
+                        }
+                    } else {
+                        patternInput.placeholder = 'Leave blank to match by name';
+                        hint.textContent = 'Leave blank to match any program containing the name. For custom matching, use text or regex: /pattern/i';
+                    }
                 },
                 
                 async editSubscription(id) {
@@ -313,11 +336,14 @@
                         }
                         document.getElementById('subType').value = typeValue;
                         
-                        document.getElementById('subPattern').value = sub.matchPattern || '';
+                        // Clear pattern if it's just the name lowercase (show as optional)
+                        const pattern = sub.matchPattern || '';
+                        document.getElementById('subPattern').value = (pattern === sub.name.toLowerCase()) ? '' : pattern;
                         document.getElementById('subExclude').value = (sub.excludePatterns || []).join(', ');
                         document.getElementById('subPriority').value = sub.priority;
                         document.getElementById('subReplays').checked = sub.includeReplays;
                         
+                        this.updatePatternHint();
                         document.getElementById('subscriptionFormTitle').scrollIntoView({ behavior: 'smooth' });
                     } catch (e) {
                         console.error('Failed to load subscription:', e);
