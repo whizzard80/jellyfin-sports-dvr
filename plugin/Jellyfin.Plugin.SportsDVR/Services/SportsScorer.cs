@@ -40,7 +40,11 @@ public class SportsScorer
     private static readonly Regex AtWordPattern = new(@"\s+at\s+(?=[A-Z])", RegexOptions.Compiled);
     private static readonly Regex VPattern = new(@"\s+v\s+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex ReplayPattern = new(@"\b(replay|classic|encore|rerun|vintage|throwback)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex YearPrefixPattern = new(@"^(19[5-9]\d|20[0-1]\d)\s+", RegexOptions.Compiled);
+    private static readonly Regex YearPrefixPattern = new(@"^(19[5-9]\d|20[0-2]\d)\s+", RegexOptions.Compiled);
+    // Detect archived content with year in parentheses: "(2008)", "(2012)", etc.
+    private static readonly Regex ArchivedYearPattern = new(@"\((19[89]\d|20[0-2]\d)\)\s*$", RegexOptions.Compiled);
+    // "Next game:" placeholder programs
+    private static readonly Regex PlaceholderPattern = new(@"^Next\s+game:", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex NonSportsPattern = new(@"\b(news|weather|forecast|talk\s*show|documentary|movie|film)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex PregamePattern = new(@"\b(pregame|postgame|halftime|preview|highlights|analysis|studio|report)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     
@@ -242,11 +246,18 @@ public class SportsScorer
             }
         }
 
-        // Negative signals
-        if (ReplayPattern.IsMatch(title) || YearPrefixPattern.IsMatch(title))
+        // Negative signals - Replay/Archive detection
+        if (ReplayPattern.IsMatch(title) || YearPrefixPattern.IsMatch(title) || ArchivedYearPattern.IsMatch(title))
         {
             score += PENALTY_REPLAY;
             result.IsReplay = true;
+        }
+        
+        // Placeholder programs (e.g., "Next game: Team vs Team at...")
+        if (PlaceholderPattern.IsMatch(title))
+        {
+            score += PENALTY_NON_SPORTS_PATTERN;
+            result.IsReplay = true; // Treat as non-live content
         }
 
         if (NonSportsPattern.IsMatch(title))

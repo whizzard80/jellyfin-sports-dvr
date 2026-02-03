@@ -400,7 +400,9 @@ public class RecordingScheduler : IHostedService, IDisposable
                     }
                     else
                     {
-                        isMatch = combinedText.Contains(pattern);
+                        // Use word boundary matching for leagues to avoid partial matches
+                        // e.g., "premier league" shouldn't match "Afghanistan Premier League"
+                        isMatch = MatchesWithWordBoundary(combinedText, pattern);
                     }
                     break;
 
@@ -411,7 +413,8 @@ public class RecordingScheduler : IHostedService, IDisposable
                     }
                     else
                     {
-                        isMatch = combinedText.Contains(pattern);
+                        // Events can use simple contains since they're more specific
+                        isMatch = combinedText.Contains(pattern, StringComparison.OrdinalIgnoreCase);
                     }
                     break;
             }
@@ -565,6 +568,28 @@ public class RecordingScheduler : IHostedService, IDisposable
         catch
         {
             return false;
+        }
+    }
+    
+    private static bool MatchesWithWordBoundary(string text, string pattern)
+    {
+        // For leagues like "Premier League", ensure we match at word boundaries
+        // This prevents "premier league" from matching "Afghanistan Premier League"
+        try
+        {
+            // Check if pattern appears at the start, or preceded by non-word char
+            var escapedPattern = Regex.Escape(pattern);
+            
+            // Match pattern that starts the text, or is preceded by start/colon/space
+            // and is followed by end/colon/space/dash
+            var wordBoundaryPattern = $@"(?:^|[:\s])({escapedPattern})(?:[:\s\-]|$)";
+            
+            return Regex.IsMatch(text, wordBoundaryPattern, RegexOptions.IgnoreCase);
+        }
+        catch
+        {
+            // Fallback to simple contains
+            return text.Contains(pattern, StringComparison.OrdinalIgnoreCase);
         }
     }
 }
