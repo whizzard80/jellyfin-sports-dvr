@@ -116,21 +116,182 @@
                         <legend id="subscriptionFormTitle">Add Subscription</legend>
                         <input type="hidden" id="editId">
                         
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="subName">Name</label>
-                            <input type="text" id="subName" placeholder="e.g., Lakers, UFC, Premier League" is="emby-input" required oninput="SportsDVR.updatePatternHint()">
-                            <div class="fieldDescription">The team, league, or event name to subscribe to.</div>
-                        </div>
-                        
                         <div class="selectContainer">
                             <label class="selectLabel" for="subType">Type</label>
-                            <select id="subType" is="emby-select" onchange="SportsDVR.updatePatternHint()">
+                            <select id="subType" is="emby-select" onchange="SportsDVR.onTypeChange()">
                                 <option value="0">Team (requires vs/@ in title)</option>
                                 <option value="1">League (matches any program)</option>
                                 <option value="2">Event Series (matches any program)</option>
                             </select>
                             <div class="fieldDescription">Team subscriptions only match games (vs/@). League/Event match any live program with the name.</div>
                         </div>
+                        
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="subName">Name</label>
+                            <input type="text" id="subName" placeholder="Type to search or enter custom..." is="emby-input" required oninput="SportsDVR.updatePatternHint()" list="teamsList" autocomplete="off">
+                            <div id="nameHint" class="fieldDescription">Type to search teams or enter a custom team name.</div>
+                        </div>
+                        
+                        <!-- Datalists for autocomplete -->
+                        <datalist id="teamsList">
+                            <!-- NBA -->
+                            <option value="Los Angeles Lakers">NBA</option>
+                            <option value="Los Angeles Clippers">NBA</option>
+                            <option value="Golden State Warriors">NBA</option>
+                            <option value="Boston Celtics">NBA</option>
+                            <option value="Brooklyn Nets">NBA</option>
+                            <option value="New York Knicks">NBA</option>
+                            <option value="Philadelphia 76ers">NBA</option>
+                            <option value="Miami Heat">NBA</option>
+                            <option value="Chicago Bulls">NBA</option>
+                            <option value="Dallas Mavericks">NBA</option>
+                            <option value="Houston Rockets">NBA</option>
+                            <option value="San Antonio Spurs">NBA</option>
+                            <option value="Phoenix Suns">NBA</option>
+                            <option value="Denver Nuggets">NBA</option>
+                            <option value="Milwaukee Bucks">NBA</option>
+                            <option value="Toronto Raptors">NBA</option>
+                            <option value="Minnesota Timberwolves">NBA</option>
+                            <option value="Oklahoma City Thunder">NBA</option>
+                            <option value="Cleveland Cavaliers">NBA</option>
+                            <!-- NFL -->
+                            <option value="Kansas City Chiefs">NFL</option>
+                            <option value="San Francisco 49ers">NFL</option>
+                            <option value="Dallas Cowboys">NFL</option>
+                            <option value="Philadelphia Eagles">NFL</option>
+                            <option value="Buffalo Bills">NFL</option>
+                            <option value="Miami Dolphins">NFL</option>
+                            <option value="New England Patriots">NFL</option>
+                            <option value="Green Bay Packers">NFL</option>
+                            <option value="Baltimore Ravens">NFL</option>
+                            <option value="Cincinnati Bengals">NFL</option>
+                            <option value="Detroit Lions">NFL</option>
+                            <!-- MLB -->
+                            <option value="New York Yankees">MLB</option>
+                            <option value="Los Angeles Dodgers">MLB</option>
+                            <option value="Boston Red Sox">MLB</option>
+                            <option value="Chicago Cubs">MLB</option>
+                            <option value="Atlanta Braves">MLB</option>
+                            <option value="Houston Astros">MLB</option>
+                            <option value="Philadelphia Phillies">MLB</option>
+                            <!-- NHL -->
+                            <option value="Edmonton Oilers">NHL</option>
+                            <option value="Florida Panthers">NHL</option>
+                            <option value="New York Rangers">NHL</option>
+                            <option value="Boston Bruins">NHL</option>
+                            <option value="Toronto Maple Leafs">NHL</option>
+                            <option value="Vegas Golden Knights">NHL</option>
+                            <option value="Colorado Avalanche">NHL</option>
+                            <!-- Premier League -->
+                            <option value="Manchester City">Premier League</option>
+                            <option value="Arsenal">Premier League</option>
+                            <option value="Liverpool">Premier League</option>
+                            <option value="Manchester United">Premier League</option>
+                            <option value="Chelsea">Premier League</option>
+                            <option value="Tottenham Hotspur">Premier League</option>
+                            <option value="Newcastle United">Premier League</option>
+                            <!-- La Liga -->
+                            <option value="Real Madrid">La Liga</option>
+                            <option value="Barcelona">La Liga</option>
+                            <option value="Atletico Madrid">La Liga</option>
+                            <!-- Serie A -->
+                            <option value="Inter Milan">Serie A</option>
+                            <option value="AC Milan">Serie A</option>
+                            <option value="Juventus">Serie A</option>
+                            <option value="Napoli">Serie A</option>
+                            <!-- Bundesliga -->
+                            <option value="Bayern Munich">Bundesliga</option>
+                            <option value="Borussia Dortmund">Bundesliga</option>
+                            <!-- Ligue 1 -->
+                            <option value="Paris Saint-Germain">Ligue 1</option>
+                        </datalist>
+                        
+                        <datalist id="leaguesList">
+                            <!-- US Pro Leagues -->
+                            <option value="NBA">US - Basketball</option>
+                            <option value="NFL">US - Football</option>
+                            <option value="MLB">US - Baseball</option>
+                            <option value="NHL">US - Hockey</option>
+                            <option value="MLS">US - Soccer</option>
+                            <option value="WNBA">US - Women's Basketball</option>
+                            <option value="NWSL">US - Women's Soccer</option>
+                            <!-- US College -->
+                            <option value="NCAA Basketball">US College</option>
+                            <option value="NCAA Football">US College</option>
+                            <option value="March Madness">US College</option>
+                            <option value="College Football">US College</option>
+                            <!-- European Soccer - Top 5 -->
+                            <option value="Premier League">England</option>
+                            <option value="La Liga">Spain</option>
+                            <option value="Serie A">Italy</option>
+                            <option value="Bundesliga">Germany</option>
+                            <option value="Ligue 1">France</option>
+                            <!-- European Competitions -->
+                            <option value="Champions League">UEFA</option>
+                            <option value="Europa League">UEFA</option>
+                            <option value="Conference League">UEFA</option>
+                            <!-- International Soccer -->
+                            <option value="World Cup">International</option>
+                            <option value="Euro">International</option>
+                            <option value="Copa America">International</option>
+                            <option value="Nations League">International</option>
+                            <option value="CONCACAF">International</option>
+                            <!-- Other European -->
+                            <option value="Eredivisie">Netherlands</option>
+                            <option value="Liga Portugal">Portugal</option>
+                            <option value="Scottish Premiership">Scotland</option>
+                            <option value="Super Lig">Turkey</option>
+                            <!-- South American -->
+                            <option value="Brasileirao">Brazil</option>
+                            <option value="Liga MX">Mexico</option>
+                            <option value="Argentine Primera">Argentina</option>
+                            <!-- Other Sports Leagues -->
+                            <option value="Formula 1">Motorsport</option>
+                            <option value="NASCAR">Motorsport</option>
+                            <option value="IndyCar">Motorsport</option>
+                            <option value="PGA Tour">Golf</option>
+                            <option value="ATP Tour">Tennis</option>
+                            <option value="WTA Tour">Tennis</option>
+                        </datalist>
+                        
+                        <datalist id="eventsList">
+                            <!-- Combat Sports -->
+                            <option value="UFC">MMA</option>
+                            <option value="Bellator">MMA</option>
+                            <option value="PFL">MMA</option>
+                            <option value="Boxing">Combat Sports</option>
+                            <option value="WWE">Wrestling</option>
+                            <option value="AEW">Wrestling</option>
+                            <!-- Major Events -->
+                            <option value="Super Bowl">NFL</option>
+                            <option value="NBA Finals">NBA</option>
+                            <option value="World Series">MLB</option>
+                            <option value="Stanley Cup">NHL</option>
+                            <option value="NBA Playoffs">NBA</option>
+                            <option value="NFL Playoffs">NFL</option>
+                            <!-- Motorsport Events -->
+                            <option value="F1 Grand Prix">Formula 1</option>
+                            <option value="Daytona 500">NASCAR</option>
+                            <option value="Indy 500">IndyCar</option>
+                            <option value="Le Mans">Endurance</option>
+                            <!-- Golf Majors -->
+                            <option value="Masters">Golf</option>
+                            <option value="US Open Golf">Golf</option>
+                            <option value="The Open Championship">Golf</option>
+                            <option value="PGA Championship">Golf</option>
+                            <option value="Ryder Cup">Golf</option>
+                            <!-- Tennis Majors -->
+                            <option value="Wimbledon">Tennis</option>
+                            <option value="US Open Tennis">Tennis</option>
+                            <option value="French Open">Tennis</option>
+                            <option value="Australian Open">Tennis</option>
+                            <!-- Other Major Events -->
+                            <option value="Olympics">Multi-sport</option>
+                            <option value="Winter Olympics">Multi-sport</option>
+                            <option value="Kentucky Derby">Horse Racing</option>
+                            <option value="Triple Crown">Horse Racing</option>
+                            <option value="X Games">Action Sports</option>
+                        </datalist>
                         
                         <div class="inputContainer">
                             <label class="inputLabel" for="subPattern">Match Pattern (optional)</label>
@@ -291,6 +452,31 @@
                     document.getElementById('subExclude').value = '';
                     document.getElementById('subPriority').value = document.getElementById('defaultPriority').value || '50';
                     document.getElementById('subReplays').checked = false;
+                    this.onTypeChange();
+                },
+                
+                onTypeChange() {
+                    const type = document.getElementById('subType').value;
+                    const nameInput = document.getElementById('subName');
+                    const nameHint = document.getElementById('nameHint');
+                    
+                    // Switch datalist based on type
+                    const datalists = { '0': 'teamsList', '1': 'leaguesList', '2': 'eventsList' };
+                    const hints = {
+                        '0': 'Type to search teams or enter a custom team name.',
+                        '1': 'Select a league or type a custom league name.',
+                        '2': 'Select an event series or type a custom event name.'
+                    };
+                    const placeholders = {
+                        '0': 'Type to search teams...',
+                        '1': 'Select or type a league...',
+                        '2': 'Select or type an event...'
+                    };
+                    
+                    nameInput.setAttribute('list', datalists[type] || 'teamsList');
+                    nameInput.placeholder = placeholders[type] || placeholders['0'];
+                    nameHint.textContent = hints[type] || hints['0'];
+                    
                     this.updatePatternHint();
                 },
                 
@@ -299,9 +485,6 @@
                     const type = document.getElementById('subType').value;
                     const patternInput = document.getElementById('subPattern');
                     const hint = document.getElementById('patternHint');
-                    
-                    const typeNames = ['Team', 'League', 'Event'];
-                    const typeName = typeNames[parseInt(type)] || 'subscription';
                     
                     if (name) {
                         patternInput.placeholder = 'Will match: ' + name.toLowerCase();
@@ -343,7 +526,7 @@
                         document.getElementById('subPriority').value = sub.priority;
                         document.getElementById('subReplays').checked = sub.includeReplays;
                         
-                        this.updatePatternHint();
+                        this.onTypeChange();
                         document.getElementById('subscriptionFormTitle').scrollIntoView({ behavior: 'smooth' });
                     } catch (e) {
                         console.error('Failed to load subscription:', e);
