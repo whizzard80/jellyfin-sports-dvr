@@ -49,3 +49,8 @@ Thumbs.db
 .env
 recordings/
 .dev-context.md
+
+# Test data
+common-epg.xml
+dispatcharr-teamarr.xml
+test/

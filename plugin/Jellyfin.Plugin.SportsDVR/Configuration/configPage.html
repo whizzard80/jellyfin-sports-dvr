@@ -304,7 +304,15 @@
                         document.getElementById('subscriptionFormTitle').textContent = 'Edit Subscription';
                         document.getElementById('editId').value = sub.id;
                         document.getElementById('subName').value = sub.name;
-                        document.getElementById('subType').value = sub.type;
+                        
+                        // Handle both integer and string enum values for type
+                        let typeValue = sub.type;
+                        if (typeof typeValue === 'string') {
+                            const typeMap = { 'Team': '0', 'League': '1', 'Event': '2' };
+                            typeValue = typeMap[typeValue] || '0';
+                        }
+                        document.getElementById('subType').value = typeValue;
+                        
                         document.getElementById('subPattern').value = sub.matchPattern || '';
                         document.getElementById('subExclude').value = (sub.excludePatterns || []).join(', ');
                         document.getElementById('subPriority').value = sub.priority;
