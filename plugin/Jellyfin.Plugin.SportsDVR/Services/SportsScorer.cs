@@ -56,8 +56,19 @@ public class SportsScorer
     // UFC numbered events: "UFC 299", "UFC 300: Main Card", etc.
     private static readonly Regex UfcNumberedPattern = new(@"\bUFC\s+(\d{2,3})\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex LiveIndicatorPattern = new(@"\b(live|new)\b|\(live\)|\[live\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    // UFC non-PPV content to exclude
-    private static readonly Regex UfcNonEventPattern = new(@"\b(countdown|embedded|preview|weigh-in|press\s*conference|ultimate\s*fighter|dana\s*white)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // UFC non-event content to exclude - interviews, previews, flashbacks, etc.
+    private static readonly Regex UfcNonEventPattern = new(
+        @"\b(countdown|embedded|preview|weigh-in|press\s*conference|ultimate\s*fighter|dana\s*white|" +
+        @"flashback|reloaded|on\s+the\s+line|connected|honors|awards|" +
+        @"тойм|클래식|review|story|stories|" +  // Foreign language recaps
+        @"previews?|breakdown|react|wants\s+revenge|" +  // Interview/analysis content
+        @"full\s+fight|fight\s+night\s+\d|ufc\s+\d+\s*[-:]\s*\w+\s+v\s+\w+\s+\(\d{4}\))\b",  // Past fights with years
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Live UFC event indicators - what we WANT to record
+    private static readonly Regex UfcLiveEventPattern = new(
+        @"\b(main\s*card|prelims?|early\s*prelims?|fight\s*night.*live|ufc\s+\d{3}.*live)\b|" +
+        @"^live[:\s].*ufc|ufc.*\blive\b",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
     
     private const int SCORE_UFC_NUMBERED = 45;         // UFC 299, UFC 300, etc.
     private const int SCORE_LIVE_INDICATOR = 10;       // "LIVE" tag bonus

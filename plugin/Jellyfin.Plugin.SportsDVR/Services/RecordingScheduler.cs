@@ -469,7 +469,39 @@ public class RecordingScheduler : IHostedService, IDisposable
             return true;
         }
 
+        // For Event subscriptions (UFC, WWE, etc.), only record actual live events
+        // Exclude interviews, previews, flashbacks, recaps, etc.
+        if (subscription.Type == SubscriptionType.Event)
+        {
+            if (IsNonLiveEventContent(title))
+            {
+                _logger.LogDebug("Excluding '{Title}' - non-live event content", program.Name);
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    // For events (UFC, WWE, etc.), use STRICT ALLOWLIST approach
+    // Only record if the title explicitly indicates LIVE broadcast
+    private static readonly Regex LiveEventPattern = new(
+        @"^live\s*[:\-]|[:\-]\s*live\b|\blive\s*$|\(live\)|\[live\]|" + // "Live:", ": Live", ends with "Live"
+        @"^(ufc|wwe|aew)\s+\d+\s*[:\-]?\s*(main\s*card|prelims?)|" +    // "UFC 325: Main Card" at start
+        @":\s*(main\s*card|prelims?|early\s*prelims?)\s*$",             // Ends with ": Main Card"
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static bool IsNonLiveEventContent(string title)
+    {
+        // STRICT: Only record if it has LIVE indicators
+        // Everything else is assumed to be replays/previews/interviews
+        if (LiveEventPattern.IsMatch(title))
+        {
+            return false; // It's live, don't exclude
+        }
+
+        // No LIVE indicator = exclude (strict approach)
+        return true;
     }
 
     private async Task ScheduleRecordingAsync(
