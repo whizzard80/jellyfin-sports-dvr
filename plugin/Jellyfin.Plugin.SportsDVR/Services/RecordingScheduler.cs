@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using Jellyfin.Plugin.SportsDVR.Configuration;
 using Jellyfin.Plugin.SportsDVR.Models;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
@@ -643,26 +644,12 @@ public class RecordingScheduler : IHostedService, IDisposable
             titleLower.Contains("ncaa") ||
             titleLower.Contains("college");
         
-        // Get hour in EST (UTC - 5)
-        var estHour = (startTimeUtc.Hour - 5 + 24) % 24;
+        // Get configured region for time-based filtering
+        var config = Plugin.Instance?.Configuration;
+        var region = config?.PrimaryRegion ?? "USA";
         
-        if (isEuropeanFootball)
-        {
-            // European football: 6:00 AM - 4:00 PM EST
-            // This is 11:00 AM - 9:00 PM UTC
-            return estHour >= 6 && estHour < 16;
-        }
-        else if (isUsaSport)
-        {
-            // USA sports: 12:00 PM - 11:59 PM EST
-            // This is 5:00 PM - 4:59 AM UTC (next day)
-            return estHour >= 12 || estHour < 1; // 12 PM to just past midnight
-        }
-        else
-        {
-            // Unknown sport - use broader window (10 AM - 11 PM EST)
-            return estHour >= 10 || estHour < 1;
-        }
+        // Use region-aware time windows
+        return RegionTimeWindows.IsWithinLiveWindow(region, startTimeUtc.Hour, isEuropeanFootball);
     }
 
     private static bool IsNonLiveEventContent(string title)

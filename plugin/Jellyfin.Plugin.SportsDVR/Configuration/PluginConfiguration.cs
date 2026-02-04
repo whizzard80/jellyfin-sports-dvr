@@ -93,4 +93,69 @@ public class PluginConfiguration : BasePluginConfiguration
     /// If true, plugin will move matching recordings to SportsRecordingsPath.
     /// </summary>
     public bool AutoOrganizeRecordings { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets the primary region for time-based filtering.
+    /// This affects when live games are expected to air.
+    /// Options: "USA", "Europe", "Asia", "Australia", "All" (no time filtering)
+    /// Default: "USA"
+    /// </summary>
+    public string PrimaryRegion { get; set; } = "USA";
+}
+
+/// <summary>
+/// Defines time windows for live sports by region.
+/// </summary>
+public static class RegionTimeWindows
+{
+    /// <summary>
+    /// Gets the typical live sports time window for a region.
+    /// Returns (startHour, endHour) in UTC.
+    /// </summary>
+    public static (int StartHour, int EndHour, int EuroFootballStart, int EuroFootballEnd) GetTimeWindow(string region)
+    {
+        return region?.ToUpperInvariant() switch
+        {
+            // USA: 12 PM - 12 AM EST = 17:00 - 05:00 UTC
+            "USA" => (17, 5, 11, 21),  // Euro football: 6 AM - 4 PM EST = 11:00 - 21:00 UTC
+            
+            // Europe: 2 PM - 11 PM CET = 13:00 - 22:00 UTC (local prime time)
+            "EUROPE" => (13, 22, 13, 22),  // Euro football same window
+            
+            // Asia: 6 PM - 12 AM JST/KST = 09:00 - 15:00 UTC
+            "ASIA" => (9, 15, 6, 12),  // Euro football: early morning local
+            
+            // Australia: 5 PM - 12 AM AEST = 07:00 - 14:00 UTC
+            "AUSTRALIA" => (7, 14, 20, 6),  // Euro football: late night/early morning local
+            
+            // All: No time filtering - accept any time
+            "ALL" or _ => (-1, -1, -1, -1)
+        };
+    }
+
+    /// <summary>
+    /// Checks if a given UTC hour falls within the live sports window for a region.
+    /// </summary>
+    public static bool IsWithinLiveWindow(string region, int utcHour, bool isEuropeanFootball = false)
+    {
+        var (start, end, euroStart, euroEnd) = GetTimeWindow(region);
+        
+        // "All" region - no time filtering
+        if (start == -1) return true;
+        
+        int windowStart = isEuropeanFootball ? euroStart : start;
+        int windowEnd = isEuropeanFootball ? euroEnd : end;
+        
+        // Handle windows that cross midnight
+        if (windowStart > windowEnd)
+        {
+            // e.g., 17:00 - 05:00 = hour >= 17 OR hour < 5
+            return utcHour >= windowStart || utcHour < windowEnd;
+        }
+        else
+        {
+            // e.g., 13:00 - 22:00 = hour >= 13 AND hour < 22
+            return utcHour >= windowStart && utcHour < windowEnd;
+        }
+    }
 }
