@@ -524,7 +524,11 @@ public class RecordingScheduler : IHostedService, IDisposable
             "afghanistan", "lanka", "india premier",       // Wrong leagues
             "t20", "cricket", "karate", "kabaddi",         // Wrong sports with "Premier League"
             "embedded", "countdown", "weigh-in",           // Event promos
-            "2017/", "2018/", "2019/", "2020/", "2021/", "2022/", "2023/", "2024/"  // Past season replays
+            "2017/", "2018/", "2019/", "2020/", "2021/", "2022/", "2023/", "2024/",  // Past season replays
+            " hl ", " hl:", ":hl ", " hls ",                // Highlights abbreviation
+            "(2008)", "(2009)", "(2010)", "(2011)", "(2012)", "(2013)", "(2014)",  // Old year replays
+            "(2015)", "(2016)", "(2017)", "(2018)", "(2019)", "(2020)", "(2021)",
+            "(2022)", "(2023)", "(2024)"
         };
         
         // Also exclude past UFC events (UFC 273, 311, 323 etc. are old)
