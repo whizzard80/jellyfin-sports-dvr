@@ -247,7 +247,10 @@ public class SportsLibraryService
 
                     // Determine destination folder
                     var destFolder = GetDestinationFolderFromScored(config, scored, matchedSub, DateTime.UtcNow);
-                    var destFilePath = Path.Combine(destBasePath, destFolder, fileInfo.Name);
+                    
+                    // Generate clean filename with periods instead of spaces
+                    var cleanFilename = GenerateCleanFilename(scored, matchedSub, fileInfo.Extension, DateTime.UtcNow);
+                    var destFilePath = Path.Combine(destBasePath, destFolder, cleanFilename);
 
                     // Ensure destination directory exists
                     Directory.CreateDirectory(Path.GetDirectoryName(destFilePath)!);
@@ -426,6 +429,72 @@ public class SportsLibraryService
         }
         
         return $"Sports Recording - {dateStr}";
+    }
+
+    /// <summary>
+    /// Generates a clean filename with periods instead of spaces.
+    /// The Jellyfin metadata (display title) will still use normal formatting.
+    /// </summary>
+    private string GenerateCleanFilename(ScoredProgram scored, Subscription? subscription, string extension, DateTime date)
+    {
+        var team1 = scored.Team1 ?? "";
+        var team2 = scored.Team2 ?? "";
+        var dateStr = date.ToString("yyyy-MM-dd");
+        
+        // Remove city prefixes for cleaner filenames
+        team1 = RemoveCityPrefix(team1);
+        team2 = RemoveCityPrefix(team2);
+        
+        string baseName;
+        if (!string.IsNullOrEmpty(team1) && !string.IsNullOrEmpty(team2))
+        {
+            baseName = $"{team1}.vs.{team2}.{dateStr}";
+        }
+        else if (subscription != null)
+        {
+            baseName = $"{subscription.Name}.{dateStr}";
+        }
+        else if (!string.IsNullOrEmpty(scored.DetectedLeague))
+        {
+            baseName = $"{scored.DetectedLeague}.{dateStr}";
+        }
+        else
+        {
+            baseName = $"Sports.Recording.{dateStr}";
+        }
+        
+        // Replace spaces with periods and sanitize
+        baseName = baseName.Replace(" ", ".");
+        baseName = SanitizeFilename(baseName);
+        
+        // Ensure extension starts with a dot
+        if (!extension.StartsWith('.'))
+        {
+            extension = "." + extension;
+        }
+        
+        return baseName + extension;
+    }
+
+    /// <summary>
+    /// Sanitizes a string for use as a filename.
+    /// </summary>
+    private static string SanitizeFilename(string filename)
+    {
+        // Remove invalid filename characters
+        var invalid = Path.GetInvalidFileNameChars();
+        foreach (var c in invalid)
+        {
+            filename = filename.Replace(c, '_');
+        }
+        
+        // Replace multiple periods with single period
+        while (filename.Contains(".."))
+        {
+            filename = filename.Replace("..", ".");
+        }
+        
+        return filename;
     }
 
     /// <summary>

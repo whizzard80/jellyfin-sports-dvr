@@ -392,22 +392,34 @@
         </div>
         
         <script>
-            const SportsDVR = {
-                getApiUrl(path) {
-                    return ApiClient.getUrl('SportsDVR' + (path ? '/' + path : ''));
-                },
+            // Use IIFE to avoid redeclaration errors when page reloads
+            (function() {
+                // Skip if already initialized on this page load
+                if (window._sportsDvrInitialized) return;
+                window._sportsDvrInitialized = true;
                 
-                initialized: false,
-                
-                async init() {
-                    if (this.initialized) return;
-                    this.initialized = true;
+                window.SportsDVR = {
+                    getApiUrl(path) {
+                        return ApiClient.getUrl('SportsDVR' + (path ? '/' + path : ''));
+                    },
                     
-                    await this.loadSettings();
-                    await this.loadSubscriptions();
-                    await this.loadStatus();
-                    await this.loadCustomAliases();
-                },
+                    initialized: false,
+                    
+                    async init() {
+                        if (this.initialized) return;
+                        this.initialized = true;
+                        
+                        await this.loadSettings();
+                        await this.loadSubscriptions();
+                        await this.loadStatus();
+                        await this.loadCustomAliases();
+                        
+                        // Bind organize button directly
+                        const organizeBtn = document.getElementById('organizeRecordings');
+                        if (organizeBtn) {
+                            organizeBtn.onclick = () => this.organizeRecordings();
+                        }
+                    },
                 
                 async loadSettings() {
                     try {
@@ -842,19 +854,11 @@
                         btn.disabled = false;
                     }
                 }
-            };
-            
-            SportsDVR.init();
-            
-            // Add organize button handler
-            document.addEventListener('DOMContentLoaded', function() {
-                const organizeBtn = document.getElementById('organizeRecordings');
-                if (organizeBtn) {
-                    organizeBtn.addEventListener('click', function() {
-                        SportsDVR.organizeRecordings();
-                    });
-                }
-            });
+                };
+                
+                // Initialize
+                SportsDVR.init();
+            })();
         </script>
     </div>
 </body>
