@@ -533,6 +533,16 @@ public class RecordingScheduler : IHostedService, IDisposable
         {
             return false; // Past UFC event number (< 325)
         }
+        
+        // Season format "XX/YY:" (e.g., "NBA 25/26:", "Serie A 25/26:") without LIVE = scheduled rebroadcast
+        if (Regex.IsMatch(title, @"\b\d{2}/\d{2}\s*:"))
+        {
+            // Only allow if it also has LIVE somewhere
+            if (!LiveIndicatorPattern.IsMatch(title))
+            {
+                return false;
+            }
+        }
 
         foreach (var pattern in nonLivePatterns)
         {
