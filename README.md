@@ -1,60 +1,58 @@
 # Jellyfin Sports DVR
 
-A Jellyfin plugin for smart sports recording with team subscriptions, automatic scheduling, and spoiler-free metadata.
+A Jellyfin plugin for smart sports recording with team subscriptions and automatic scheduling.
 
 ## Features
 
 - **Team Subscriptions** - Subscribe to your favorite teams and automatically record all their games
-- **Smart Pattern Matching** - Extracts teams and leagues from EPG titles using intelligent parsing
-- **Replay Detection** - Automatically skips replays/encores (optional per-subscription)
-- **Per-Subscription Retention** - Different retention rules for different teams
-- **Favorite Teams** - Mark teams to never auto-delete
-- **Priority Conflicts** - Higher priority subscriptions win tuner slots
-- **Rolling Window** - Keep the last N games per team, drop oldest for newest
-- **Spoiler-Free** - Metadata never includes scores, results, or game outcomes
+- **League Subscriptions** - Record all games from a league (NBA, Premier League, etc.)
+- **Event Subscriptions** - Record live events like UFC, WWE, F1
+- **Smart LIVE Detection** - Only records actual live games, not replays or highlights
+- **Time-Based Heuristics** - Knows when games typically air (NBA evening, European football morning)
+- **Same-Game Deduplication** - Won't record the same game on multiple channels
+- **Connection-Aware Scheduling** - Respects your IPTV connection limits (1, 2, 6, etc.)
+- **Priority-Based Conflicts** - Higher priority subscriptions win tuner slots
+- **Teamarr/Dispatcharr Compatible** - Works great with `<live>` tagged EPGs
+
+## Installation
+
+1. Download `Jellyfin.Plugin.SportsDVR.dll` from the [Releases](../../releases) page
+2. Copy to your Jellyfin plugins folder:
+   - **Linux**: `~/.local/share/jellyfin/plugins/SportsDVR/`
+   - **Windows**: `%APPDATA%\Jellyfin\plugins\SportsDVR\`
+   - **Docker**: `/config/plugins/SportsDVR/`
+3. Restart Jellyfin
+4. Go to **Dashboard → Plugins → Sports DVR** to configure
+
+That's it! No additional software required.
 
 ## How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Jellyfin Live TV Guide                   │
-│         (EPG from Dispatcharr or any tuner source)          │
+│         (EPG from Dispatcharr, Teamarr, or any source)      │
 └─────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Sports DVR Plugin                       │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐   │
-│  │  EPG Parser │→ │Pattern Matcher│→ │Recording Scheduler│   │
-│  │ (extracts   │  │ (matches     │  │ (creates Jellyfin │   │
-│  │  teams)     │  │  subs)       │  │  timers)          │   │
+│  │ LIVE Filter │→ │Pattern Matcher│→ │ Smart Scheduler   │   │
+│  │ (no replays)│  │ (matches subs)│  │ (respects limits) │   │
 │  └─────────────┘  └──────────────┘  └───────────────────┘   │
 │                                                              │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │              Subscription Manager                    │    │
-│  │  • Lakers (Team, Pri:90, Keep:∞, Favorite)          │    │
-│  │  • UFC (Event, Pri:80, Keep:5, Ret:14d)             │    │
-│  │  • Premier League (League, Pri:50, Keep:10)          │    │
+│  │              Your Subscriptions                      │    │
+│  │  • Boston Celtics (Team, Priority: 95)              │    │
+│  │  • Premier League (League, Priority: 60)            │    │
+│  │  • UFC (Event, Priority: 80)                        │    │
 │  └─────────────────────────────────────────────────────┘    │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              Retention Manager                       │    │
-│  │  • Enforces max recordings per subscription          │    │
-│  │  • Applies retention days                           │    │
-│  │  • Protects favorites from deletion                 │    │
-│  └─────────────────────────────────────────────────────┘    │
+│                              │                               │
+│                              ▼                               │
+│              Jellyfin DVR (handles recording)               │
 └─────────────────────────────────────────────────────────────┘
 ```
-
-## Installation
-
-1. Download the latest release from the Releases page
-2. Extract `Jellyfin.Plugin.SportsDVR.dll` to your Jellyfin plugins folder:
-   - Linux: `~/.local/share/jellyfin/plugins/SportsDVR/`
-   - Windows: `%APPDATA%\Jellyfin\plugins\SportsDVR\`
-   - Docker: `/config/plugins/SportsDVR/`
-3. Restart Jellyfin
-4. Go to Dashboard → Plugins → Sports DVR to configure
 
 ## Configuration
 
@@ -62,52 +60,63 @@ A Jellyfin plugin for smart sports recording with team subscriptions, automatic 
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| Sports Library Path | Where recordings are stored | `/media/sports` |
-| Max Concurrent Recordings | Tuner/stream limit | `2` |
-| Default Priority | Priority for new subscriptions | `50` |
-| Default Retention | Days to keep recordings | `7` |
-| Default Max Recordings | Max games per subscription | `10` |
+| Max Concurrent Recordings | Your IPTV connection limit | `2` |
 | EPG Scan Interval | How often to check for matches | `5 min` |
+| Enable Auto Scheduling | Automatically create recordings | `true` |
 
 ### Subscription Settings
 
-Each subscription can have:
-
 | Setting | Description |
 |---------|-------------|
-| **Name** | Display name (e.g., "Lakers", "UFC") |
+| **Name** | Team, league, or event name (e.g., "Boston Celtics") |
 | **Type** | Team, League, or Event |
-| **Match Pattern** | Simple text or regex (e.g., `/lakers\|la lakers/i`) |
-| **Exclude Patterns** | Skip if these match (e.g., "countdown, preview") |
-| **Priority** | 1-100, higher wins conflicts |
-| **Keep Last** | Max recordings to keep (0 = unlimited) |
-| **Retention Days** | Auto-delete after N days (0 = never) |
-| **Favorite** | Never auto-delete |
-| **Include Replays** | Record replays/encores/classics |
+| **Match Pattern** | Optional: custom pattern to match (auto-generated if blank) |
+| **Exclude Patterns** | Skip if these match (e.g., "preview, countdown") |
+| **Priority** | 1-100, higher wins conflicts (default: 50) |
+| **Include Replays** | Record replays/encores/classics (default: off) |
 
-## Pattern Matching
+## LIVE Detection
 
-The plugin intelligently parses EPG titles:
+The plugin filters out non-live content:
 
-| EPG Title | Extracted |
-|-----------|-----------|
-| `Lakers vs Warriors - NBA` | Teams: Lakers, Warriors / League: NBA |
-| `UFC 300: Main Card (LIVE)` | Event: UFC / Live: Yes |
-| `Premier League: Man City vs Leeds` | Teams: Man City, Leeds / League: Premier League |
-| `NFL Sunday: Patriots @ Bills` | Teams: Patriots, Bills / League: NFL |
-| `NBA Classic: 1995 Finals (Replay)` | Replay: Yes (skipped by default) |
+### ✅ Will Record
+- Programs with `<live>` EPG tag (Teamarr/Dispatcharr)
+- Titles with "LIVE:" or "(Live)"
+- Games in appropriate time windows:
+  - **USA Sports** (NBA, NFL, NHL, MLB): 12 PM - 12 AM EST
+  - **European Football** (Premier League, Serie A): 6 AM - 4 PM EST
 
-### Replay Detection
+### ❌ Will Skip
+- Replays, encores, classics, throwbacks
+- Highlights (HL), recaps, mini-games
+- Pregame/postgame shows
+- Old events with years: "(2008)", "(2016)"
+- Past UFC events (UFC 273, UFC 311, etc.)
+- Non-sports with "Premier League" (cricket T20, karate)
 
-These words trigger replay detection (skipped unless "Include Replays" is enabled):
-- replay, encore, classic, rerun, re-air
-- rebroadcast, throwback, vintage, best of
-- Year patterns like "1995", "2018" (indicates old games)
+## Connection Scaling
 
-### Team vs Event Subscriptions
+The scheduler adapts to your IPTV plan:
 
-- **Team** subscriptions require a matchup pattern (`vs`, `@`, `v`) in the title to avoid false positives like documentaries about the team
-- **Event** subscriptions (UFC, WWE, F1) don't require matchup patterns since they're event series, not team matchups
+| Connections | Behavior |
+|-------------|----------|
+| 1 | Only highest priority games |
+| 2 | Good balance - your teams + alternates |
+| 6+ | Captures most matching games |
+
+When slots are full, higher priority subscriptions preempt lower ones.
+
+## Pattern Matching Examples
+
+| EPG Title | Detected As |
+|-----------|-------------|
+| `Live NBA: Celtics @ Mavericks` | ✅ Celtics game |
+| `Boston Celtics at Houston Rockets` | ✅ Celtics game |
+| `Serie A: Bologna vs AC Milan` | ✅ AC Milan + Serie A |
+| `UFC 325: Volkanovski vs Lopes 2` | ✅ UFC event |
+| `NBA 25/26: Lakers v Warriors` | ❌ No LIVE tag (replay) |
+| `UFC 273: Main Card (2022)` | ❌ Old event |
+| `Premier League Review` | ❌ Not a game |
 
 ## API Endpoints
 
@@ -115,35 +124,32 @@ These words trigger replay detection (skipped unless "Include Replays" is enable
 |----------|--------|-------------|
 | `/SportsDVR/Subscriptions` | GET | List all subscriptions |
 | `/SportsDVR/Subscriptions` | POST | Create subscription |
-| `/SportsDVR/Subscriptions/{id}` | GET | Get subscription |
 | `/SportsDVR/Subscriptions/{id}` | PUT | Update subscription |
 | `/SportsDVR/Subscriptions/{id}` | DELETE | Delete subscription |
-| `/SportsDVR/Subscriptions/{id}/Toggle` | POST | Enable/disable |
-| `/SportsDVR/Parse` | POST | Parse a program title |
-| `/SportsDVR/Recordings` | GET | List all recordings |
-| `/SportsDVR/Recordings/Upcoming` | GET | Scheduled recordings |
-| `/SportsDVR/Recordings/Recent` | GET | Recent recordings |
-| `/SportsDVR/Status` | GET | Plugin status summary |
+| `/SportsDVR/Status` | GET | Plugin status |
+| `/SportsDVR/Aliases` | GET/POST | Manage team aliases |
 
 ## Building from Source
 
+For developers only:
+
 ```bash
+# Requires .NET 8.0 SDK
 cd plugin/Jellyfin.Plugin.SportsDVR
 dotnet build -c Release
 ```
 
-The DLL will be in `bin/Release/net8.0/`.
+Output: `bin/Release/net8.0/Jellyfin.Plugin.SportsDVR.dll`
 
 ## Requirements
 
 - Jellyfin 10.9+
-- Live TV configured with EPG data (Dispatcharr, HDHomeRun, etc.)
-- .NET 8.0 Runtime
+- Live TV configured with EPG data
 
 ## License
 
 MIT License - see [LICENSE](LICENSE)
 
-## Credits
+---
 
-Built for sports fans who want a dedicated DVR experience in Jellyfin without spoilers.
+Built for sports fans who want automatic game recording without spoilers. 🏀⚽🏒🥊
