@@ -433,6 +433,7 @@ public class SportsLibraryService
 
     /// <summary>
     /// Generates a clean filename with periods instead of spaces.
+    /// Format: team1.vs.team2.2026-02-04.mp4
     /// The Jellyfin metadata (display title) will still use normal formatting.
     /// </summary>
     private string GenerateCleanFilename(ScoredProgram scored, Subscription? subscription, string extension, DateTime date)
@@ -440,6 +441,10 @@ public class SportsLibraryService
         var team1 = scored.Team1 ?? "";
         var team2 = scored.Team2 ?? "";
         var dateStr = date.ToString("yyyy-MM-dd");
+        
+        // Clean up team names - remove timestamps, prefixes, and junk
+        team1 = CleanTeamNameForFilename(team1);
+        team2 = CleanTeamNameForFilename(team2);
         
         // Remove city prefixes for cleaner filenames
         team1 = RemoveCityPrefix(team1);
@@ -452,7 +457,8 @@ public class SportsLibraryService
         }
         else if (subscription != null)
         {
-            baseName = $"{subscription.Name}.{dateStr}";
+            var cleanSubName = CleanTeamNameForFilename(subscription.Name);
+            baseName = $"{cleanSubName}.{dateStr}";
         }
         else if (!string.IsNullOrEmpty(scored.DetectedLeague))
         {
@@ -474,6 +480,43 @@ public class SportsLibraryService
         }
         
         return baseName + extension;
+    }
+
+    /// <summary>
+    /// Cleans a team name for use in filenames by removing timestamps, prefixes, and junk.
+    /// </summary>
+    private static string CleanTeamNameForFilename(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+        
+        // Remove timestamp patterns like 2025_08_02_16_00_00 or 2025-08-02-16-00-00
+        name = Regex.Replace(name, @"\d{4}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}", "");
+        
+        // Remove date patterns like 2025_08_02 or 2025-08-02 at the start
+        name = Regex.Replace(name, @"^\d{4}[_\-]\d{2}[_\-]\d{2}[_\.\-]*", "");
+        
+        // Remove league prefixes like "MLB.Baseball." or "NFL.Football." or "College.Hockey."
+        name = Regex.Replace(name, @"^(MLB|NFL|NBA|NHL|NCAA|MLS|College|Premier|La\.?Liga|Serie\.?A|Bundesliga|Ligue\.?1)[._\-]?(Baseball|Football|Basketball|Hockey|Soccer)?[._\-]*", "", RegexOptions.IgnoreCase);
+        
+        // Remove leading/trailing separators and junk
+        name = Regex.Replace(name, @"^[\._\-]+", "");  // Leading dots, underscores, dashes
+        name = Regex.Replace(name, @"[\._\-]+$", "");  // Trailing dots, underscores, dashes
+        name = Regex.Replace(name, @"[\._\-]{2,}", ".");  // Multiple separators to single dot
+        
+        // Replace underscores with dots for consistency
+        name = name.Replace("_", ".");
+        name = name.Replace("-", ".");
+        
+        // Clean up multiple dots
+        while (name.Contains(".."))
+        {
+            name = name.Replace("..", ".");
+        }
+        
+        // Trim dots from edges
+        name = name.Trim('.');
+        
+        return name;
     }
 
     /// <summary>
