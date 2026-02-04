@@ -228,16 +228,20 @@ public class SportsLibraryService
                     var title = baseItem?.Name ?? Path.GetFileNameWithoutExtension(filePath);
                     var overview = baseItem?.Overview ?? "";
 
+                    // Check if filename has obvious sports league prefix
+                    var hasObviousSportsPrefix = HasSportsLeaguePrefix(fileInfo.Name);
+
                     // Score the program to detect if it's a sports game
                     var scored = _sportsScorer.Score(title, "", overview);
                     
                     // Match to subscription
                     var matchedSub = FindMatchingSubscriptionByTitle(title, scored);
 
-                    // Only move if it matches a subscription OR scores as likely/possible sports
-                    if (matchedSub == null && scored.Score < SportsScorer.THRESHOLD_POSSIBLE_GAME)
+                    // Move if: matches subscription, scores as sports, OR has obvious sports prefix in filename
+                    if (matchedSub == null && scored.Score < SportsScorer.THRESHOLD_POSSIBLE_GAME && !hasObviousSportsPrefix)
                     {
-                        _logger.LogDebug("Not a sports game (score {Score}): {Title}", scored.Score, title);
+                        _logger.LogDebug("Not a sports game (score {Score}, hasPrefix: {HasPrefix}): {Title}", 
+                            scored.Score, hasObviousSportsPrefix, title);
                         continue;
                     }
 
@@ -251,6 +255,9 @@ public class SportsLibraryService
                     // Generate clean filename with periods instead of spaces
                     var cleanFilename = GenerateCleanFilename(scored, matchedSub, fileInfo.Extension, DateTime.UtcNow);
                     var destFilePath = Path.Combine(destBasePath, destFolder, cleanFilename);
+
+                    // Handle collision - if file exists, append a counter
+                    destFilePath = GetUniqueDestinationPath(destFilePath);
 
                     // Ensure destination directory exists
                     Directory.CreateDirectory(Path.GetDirectoryName(destFilePath)!);
@@ -538,6 +545,79 @@ public class SportsLibraryService
         }
         
         return filename;
+    }
+
+    /// <summary>
+    /// Checks if a filename has an obvious sports league prefix.
+    /// This helps detect old recordings that might not score well but are clearly sports.
+    /// </summary>
+    private static bool HasSportsLeaguePrefix(string filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return false;
+        
+        // Common sports league prefixes in filenames
+        var sportsPatterns = new[]
+        {
+            @"^MLB[\._\-]",           // MLB Baseball
+            @"^NFL[\._\-]",           // NFL Football  
+            @"^NBA[\._\-]",           // NBA Basketball
+            @"^NHL[\._\-]",           // NHL Hockey
+            @"^NCAA[\._\-]",          // College sports
+            @"^MLS[\._\-]",           // MLS Soccer
+            @"^EPL[\._\-]",           // English Premier League
+            @"^Premier[\._\-]?League",// Premier League
+            @"^La[\._\-]?Liga",       // La Liga
+            @"^Serie[\._\-]?A",       // Serie A
+            @"^Bundesliga",           // Bundesliga
+            @"^UFC[\._\-]",           // UFC
+            @"^WWE[\._\-]",           // WWE
+            @"^Boxing[\._\-]",        // Boxing
+            @"^Golf[\._\-]",          // Golf
+            @"^Tennis[\._\-]",        // Tennis
+            @"^F1[\._\-]",            // Formula 1
+            @"^NASCAR[\._\-]",        // NASCAR
+            @"^College[\._\-]",       // College sports
+            @"^Baseball[\._\-]",      // Generic Baseball
+            @"^Football[\._\-]",      // Generic Football
+            @"^Basketball[\._\-]",    // Generic Basketball
+            @"^Hockey[\._\-]",        // Generic Hockey
+            @"^Soccer[\._\-]",        // Generic Soccer
+        };
+        
+        foreach (var pattern in sportsPatterns)
+        {
+            if (Regex.IsMatch(filename, pattern, RegexOptions.IgnoreCase))
+            {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /// <summary>
+    /// Gets a unique destination path by appending a counter if the file already exists.
+    /// </summary>
+    private static string GetUniqueDestinationPath(string destFilePath)
+    {
+        if (!File.Exists(destFilePath))
+        {
+            return destFilePath;
+        }
+        
+        var directory = Path.GetDirectoryName(destFilePath) ?? "";
+        var filenameWithoutExt = Path.GetFileNameWithoutExtension(destFilePath);
+        var extension = Path.GetExtension(destFilePath);
+        
+        int counter = 2;
+        string newPath;
+        do
+        {
+            newPath = Path.Combine(directory, $"{filenameWithoutExt}.{counter}{extension}");
+            counter++;
+        } while (File.Exists(newPath) && counter < 1000);
+        
+        return newPath;
     }
 
     /// <summary>
