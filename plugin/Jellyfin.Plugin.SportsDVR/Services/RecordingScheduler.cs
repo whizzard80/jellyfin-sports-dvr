@@ -430,9 +430,10 @@ public class RecordingScheduler : IHostedService, IDisposable
 
     private bool ShouldExclude(ProgramInfo program, ScoredProgram scored, Subscription subscription)
     {
-        var title = program.Name?.ToLowerInvariant() ?? string.Empty;
+        var title = program.Name ?? string.Empty;
+        var titleLower = title.ToLowerInvariant();
         var description = program.Overview?.ToLowerInvariant() ?? string.Empty;
-        var combinedText = $"{title} {description}";
+        var combinedText = $"{titleLower} {description}";
 
         // Check exclusion patterns
         if (subscription.ExcludePatterns != null)
@@ -469,19 +470,120 @@ public class RecordingScheduler : IHostedService, IDisposable
             return true;
         }
 
-        // For Event subscriptions (UFC, WWE, etc.), only record actual live events
-        // Exclude interviews, previews, flashbacks, recaps, etc.
-        if (subscription.Type == SubscriptionType.Event)
+        // HARD RULE: Only record LIVE content for ALL subscription types
+        // Teams = live games only, Leagues = live games only, Events = live events only
+        if (!IsLiveContent(title, program))
         {
-            if (IsNonLiveEventContent(title))
-            {
-                _logger.LogDebug("Excluding '{Title}' - non-live event content", program.Name);
-                return true;
-            }
+            _logger.LogDebug("Excluding '{Title}' - not live content", program.Name);
+            return true;
         }
 
         return false;
     }
+
+    /// <summary>
+    /// Check if content is LIVE - applies to all subscription types
+    /// </summary>
+    private static bool IsLiveContent(string title, ProgramInfo program)
+    {
+        // Check program flags first
+        if (program.IsLive)
+        {
+            return true;
+        }
+
+        var titleLower = title.ToLower();
+
+        // Explicit LIVE indicators in title
+        if (LiveIndicatorPattern.IsMatch(title))
+        {
+            return true;
+        }
+
+        // Main Card / Prelims for events
+        if (Regex.IsMatch(title, @":\s*(main\s*card|prelims?)\s*$", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        // Exclude obvious non-live content
+        var nonLivePatterns = new[] {
+            "channel", "network", "tv", "24/7",            // Channel names
+            "show", "magazine", "stories", "story",        // Shows
+            "preview", "review", "analysis", "breakdown",  // Analysis content
+            "flashback", "reloaded", "archive", "repeat",  // Replays
+            "greatest", "best of", "top 10", "top ten",    // Compilations
+            "fight o'clock", "fight pass",                 // UFC filler
+            "netbusters", "goals of", "goal of",           // Highlight shows
+            "full fight", "full match",                    // Fight/match replays
+            "q&a", "q a", "faceoff", "faceoffs",           // Interviews/promos
+            "expects", "expects finish", "wants revenge",  // Interview headlines
+            "what's next", "what s next", "who's next", "who s next",  // More interviews
+            "match hls", "hls 25", "hls 24",               // Abbreviated highlights
+            "postgame", "pregame", "halftime",             // Pre/post shows
+            "afghanistan", "lanka", "india premier",       // Wrong leagues
+            "t20", "cricket", "karate", "kabaddi",         // Wrong sports with "Premier League"
+            "embedded", "countdown", "weigh-in",           // Event promos
+            "2017/", "2018/", "2019/", "2020/", "2021/", "2022/", "2023/", "2024/"  // Past season replays
+        };
+        
+        // Also exclude past UFC events (UFC 273, 311, 323 etc. are old)
+        // Only allow current/recent UFC numbers (325, 326+)
+        if (Regex.IsMatch(titleLower, @"ufc\s*(1\d\d|2[0-4]\d|2[5-9]\d|3[01]\d|32[0-4])\b"))
+        {
+            return false; // Past UFC event number (< 325)
+        }
+
+        foreach (var pattern in nonLivePatterns)
+        {
+            if (titleLower.Contains(pattern))
+            {
+                return false;
+            }
+        }
+
+        // For sports games with vs/v/@/at pattern
+        // Use time-based heuristics to determine if likely live
+        if (Regex.IsMatch(title, @"\s+(vs\.?|v\.?|@|at)\s+", RegexOptions.IgnoreCase))
+        {
+            // If explicitly marked live, always accept
+            if (program.IsLive)
+            {
+                return true;
+            }
+            
+            // Use time-based heuristics for game broadcasts
+            return IsLikelyLiveGameTime(title, program.StartDate);
+        }
+        
+        // "Team at Team" format without prefix - likely current game
+        if (Regex.IsMatch(title, @"^[A-Z][a-zA-Z\s]+ at [A-Z][a-zA-Z\s]+$"))
+        {
+            return true;
+        }
+
+        // Generic titles without clear indicators - exclude
+        // "Premier League", "NBA Basketball", etc. alone are not specific enough
+        if (Regex.IsMatch(title, @"^(premier league|nba|nfl|nhl|mlb|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football)?$", RegexOptions.IgnoreCase))
+        {
+            return false;
+        }
+
+        // If program is marked as new/premiere, consider it live
+        if (program.IsPremiere)
+        {
+            return true;
+        }
+
+        // Default: if no live indicator found, exclude
+        // This is strict but ensures only truly live content
+        return false;
+    }
+
+    // Pattern for LIVE indicators in title
+    private static readonly Regex LiveIndicatorPattern = new(
+        @"\blive\b|\(live\)|\[live\]|^live\s*:|:\s*live\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // For events (UFC, WWE, etc.), use STRICT ALLOWLIST approach
     // Only record if the title explicitly indicates LIVE broadcast
@@ -490,6 +592,64 @@ public class RecordingScheduler : IHostedService, IDisposable
         @"^(ufc|wwe|aew)\s+\d+\s*[:\-]?\s*(main\s*card|prelims?)|" +    // "UFC 325: Main Card" at start
         @":\s*(main\s*card|prelims?|early\s*prelims?)\s*$",             // Ends with ": Main Card"
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Determines if a game is likely live based on time-of-day heuristics.
+    /// USA sports: 12:00 PM - 11:59 PM EST (5:00 PM - 4:59 AM UTC)
+    /// European football: 6:00 AM - 4:00 PM EST (11:00 AM - 9:00 PM UTC)
+    /// </summary>
+    private static bool IsLikelyLiveGameTime(string title, DateTime startTimeUtc)
+    {
+        var titleLower = title.ToLowerInvariant();
+        
+        // Detect sport type from title
+        var isEuropeanFootball = 
+            titleLower.Contains("premier league") ||
+            titleLower.Contains("serie a") ||
+            titleLower.Contains("la liga") ||
+            titleLower.Contains("bundesliga") ||
+            titleLower.Contains("ligue 1") ||
+            titleLower.Contains("champions league") ||
+            titleLower.Contains("europa league") ||
+            titleLower.Contains("carabao") ||
+            titleLower.Contains("fa cup") ||
+            titleLower.Contains("epl") ||
+            titleLower.Contains("pl:");
+        
+        var isUsaSport =
+            titleLower.Contains("nba") ||
+            titleLower.Contains("nfl") ||
+            titleLower.Contains("nhl") ||
+            titleLower.Contains("mlb") ||
+            titleLower.Contains("celtics") ||
+            titleLower.Contains("lakers") ||
+            titleLower.Contains("warriors") ||
+            titleLower.Contains("mavericks") ||
+            titleLower.Contains("rockets") ||
+            titleLower.Contains("ncaa") ||
+            titleLower.Contains("college");
+        
+        // Get hour in EST (UTC - 5)
+        var estHour = (startTimeUtc.Hour - 5 + 24) % 24;
+        
+        if (isEuropeanFootball)
+        {
+            // European football: 6:00 AM - 4:00 PM EST
+            // This is 11:00 AM - 9:00 PM UTC
+            return estHour >= 6 && estHour < 16;
+        }
+        else if (isUsaSport)
+        {
+            // USA sports: 12:00 PM - 11:59 PM EST
+            // This is 5:00 PM - 4:59 AM UTC (next day)
+            return estHour >= 12 || estHour < 1; // 12 PM to just past midnight
+        }
+        else
+        {
+            // Unknown sport - use broader window (10 AM - 11 PM EST)
+            return estHour >= 10 || estHour < 1;
+        }
+    }
 
     private static bool IsNonLiveEventContent(string title)
     {
