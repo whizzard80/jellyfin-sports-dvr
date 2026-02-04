@@ -329,6 +329,55 @@
                         </div>
                     </fieldset>
                     
+                    <!-- Library Organization -->
+                    <fieldset class="verticalSection">
+                        <legend>Library Organization</legend>
+                        
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="sportsLibraryName">Sports Library Name</label>
+                            <input type="text" id="sportsLibraryName" is="emby-input" placeholder="Sports DVR">
+                            <div class="fieldDescription">Name of Jellyfin library containing sports recordings</div>
+                        </div>
+                        
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="sportsRecordingsPath">Sports Recordings Path</label>
+                            <input type="text" id="sportsRecordingsPath" is="emby-input" placeholder="/mnt/movies/hyperdata/dvr/sports-dvr/">
+                            <div class="fieldDescription">Path where sports recordings are stored (or should be moved to)</div>
+                        </div>
+                        
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="folderOrganization">Folder Organization</label>
+                            <select id="folderOrganization" is="emby-select">
+                                <option value="Subscription">By Subscription (Team/League/Event)</option>
+                                <option value="Date">By Date (2026-02-05)</option>
+                                <option value="League">By League then Date (NBA/2026-02-05)</option>
+                                <option value="League_Date">By League and Date (NBA_2026-02-05)</option>
+                                <option value="None">Flat Structure (no subfolders)</option>
+                            </select>
+                            <div class="fieldDescription">How to organize recordings into subfolders</div>
+                        </div>
+                        
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input type="checkbox" id="autoOrganizeRecordings" is="emby-checkbox">
+                                <span>Auto-organize recordings</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">
+                                Automatically move matching recordings to sports folder after post-processing
+                            </div>
+                        </div>
+                        
+                        <div style="margin-top: 1em;">
+                            <button type="button" id="organizeRecordings" is="emby-button" class="raised button-submit">
+                                <span>Organize Existing Recordings</span>
+                            </button>
+                            <div class="fieldDescription">
+                                One-time: Scan "DVR Recordings" library and move all sports games (matching subscriptions OR detected as sports) to Sports DVR folder. Going forward, organization is handled automatically by the post-processing script.
+                            </div>
+                            <div id="organizeStatus" style="margin-top: 0.5em; display: none;"></div>
+                        </div>
+                    </fieldset>
+                    
                 </form>
             </div>
         </div>
@@ -359,6 +408,10 @@
                         document.getElementById('scanInterval').value = config.ScanIntervalMinutes || 5;
                         document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
                         document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
+                        document.getElementById('sportsLibraryName').value = config.SportsLibraryName || 'Sports DVR';
+                        document.getElementById('sportsRecordingsPath').value = config.SportsRecordingsPath || '/mnt/movies/hyperdata/dvr/sports-dvr/';
+                        document.getElementById('folderOrganization').value = config.FolderOrganization || 'League';
+                        document.getElementById('autoOrganizeRecordings').checked = config.AutoOrganizeRecordings || false;
                     } catch (e) {
                         console.error('Failed to load settings:', e);
                     }
@@ -372,6 +425,10 @@
                         config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);
                         config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
+                        config.SportsLibraryName = document.getElementById('sportsLibraryName').value || 'Sports DVR';
+                        config.SportsRecordingsPath = document.getElementById('sportsRecordingsPath').value || '/mnt/movies/hyperdata/dvr/sports-dvr/';
+                        config.FolderOrganization = document.getElementById('folderOrganization').value || 'League';
+                        config.AutoOrganizeRecordings = document.getElementById('autoOrganizeRecordings').checked;
                         
                         await ApiClient.updatePluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890', config);
                         Dashboard.alert('Settings saved!');
@@ -741,10 +798,52 @@
                     const div = document.createElement('div');
                     div.textContent = text;
                     return div.innerHTML;
+                },
+                
+                async organizeRecordings() {
+                    const btn = document.getElementById('organizeRecordings');
+                    const status = document.getElementById('organizeStatus');
+                    btn.disabled = true;
+                    status.style.display = 'block';
+                    status.textContent = 'Organizing...';
+                    
+                    try {
+                        const response = await ApiClient.ajax({
+                            url: this.getApiUrl('Library/Organize'),
+                            type: 'POST',
+                            dataType: 'json'
+                        });
+                        
+                        status.innerHTML = '<strong>Complete!</strong><br>' +
+                            'Scanned: ' + response.Scanned + '<br>' +
+                            'Matched: ' + response.Matched + '<br>' +
+                            'Moved: ' + response.Moved + '<br>' +
+                            'Skipped: ' + response.Skipped + '<br>' +
+                            'Failed: ' + response.Failed;
+                        
+                        if (response.Errors && response.Errors.length > 0) {
+                            status.innerHTML += '<br><br><strong>Errors:</strong><br>' + response.Errors.join('<br>');
+                        }
+                    } catch (error) {
+                        status.textContent = 'Error: ' + (error.message || 'Unknown error');
+                        console.error('Organization error:', error);
+                    } finally {
+                        btn.disabled = false;
+                    }
                 }
             };
             
             SportsDVR.init();
+            
+            // Add organize button handler
+            document.addEventListener('DOMContentLoaded', function() {
+                const organizeBtn = document.getElementById('organizeRecordings');
+                if (organizeBtn) {
+                    organizeBtn.addEventListener('click', function() {
+                        SportsDVR.organizeRecordings();
+                    });
+                }
+            });
         </script>
     </div>
 </body>

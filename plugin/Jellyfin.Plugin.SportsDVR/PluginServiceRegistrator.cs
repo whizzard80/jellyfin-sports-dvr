@@ -20,6 +20,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<AliasService>();
         services.AddSingleton<SubscriptionManager>();
         services.AddSingleton<SmartScheduler>();
+        services.AddSingleton<SportsLibraryService>();
 
         // Background service for EPG scanning and Jellyfin DVR integration
         services.AddHostedService<RecordingScheduler>();

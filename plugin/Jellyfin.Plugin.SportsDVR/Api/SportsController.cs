@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Threading.Tasks;
 using Jellyfin.Plugin.SportsDVR.Models;
 using Jellyfin.Plugin.SportsDVR.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -23,6 +24,7 @@ public class SportsController : ControllerBase
     private readonly SubscriptionManager _subscriptionManager;
     private readonly EpgParser _epgParser;
     private readonly PatternMatcher _patternMatcher;
+    private readonly SportsLibraryService _libraryService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SportsController"/> class.
@@ -31,12 +33,14 @@ public class SportsController : ControllerBase
         ILogger<SportsController> logger,
         SubscriptionManager subscriptionManager,
         EpgParser epgParser,
-        PatternMatcher patternMatcher)
+        PatternMatcher patternMatcher,
+        SportsLibraryService libraryService)
     {
         _logger = logger;
         _subscriptionManager = subscriptionManager;
         _epgParser = epgParser;
         _patternMatcher = patternMatcher;
+        _libraryService = libraryService;
     }
 
     // ==================== SUBSCRIPTIONS ====================
@@ -298,6 +302,105 @@ public class SportsController : ControllerBase
         Plugin.Instance!.SaveConfiguration();
 
         return NoContent();
+    }
+
+    // ==================== LIBRARY ====================
+
+    /// <summary>
+    /// Gets all recordings grouped by date.
+    /// </summary>
+    [HttpGet("Library")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<Dictionary<string, List<SportsRecordingDto>>>> GetLibrary()
+    {
+        var recordings = await _libraryService.GetRecordingsByDateAsync();
+        return Ok(recordings);
+    }
+
+    /// <summary>
+    /// Gets today's recordings.
+    /// </summary>
+    [HttpGet("Library/Today")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<List<SportsRecordingDto>>> GetToday()
+    {
+        var recordings = await _libraryService.GetRecordingsByDateAsync();
+        return Ok(recordings.GetValueOrDefault("Today", new List<SportsRecordingDto>()));
+    }
+
+    /// <summary>
+    /// Gets this week's recordings.
+    /// </summary>
+    [HttpGet("Library/ThisWeek")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<List<SportsRecordingDto>>> GetThisWeek()
+    {
+        var recordings = await _libraryService.GetRecordingsByDateAsync();
+        return Ok(recordings.GetValueOrDefault("ThisWeek", new List<SportsRecordingDto>()));
+    }
+
+    /// <summary>
+    /// Gets this month's recordings.
+    /// </summary>
+    [HttpGet("Library/ThisMonth")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<List<SportsRecordingDto>>> GetThisMonth()
+    {
+        var recordings = await _libraryService.GetRecordingsByDateAsync();
+        return Ok(recordings.GetValueOrDefault("ThisMonth", new List<SportsRecordingDto>()));
+    }
+
+    /// <summary>
+    /// Gets recordings for a specific subscription.
+    /// </summary>
+    [HttpGet("Library/Subscription/{id}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<List<SportsRecordingDto>>> GetSubscriptionRecordings([FromRoute] string id)
+    {
+        var recordings = await _libraryService.GetRecordingsForSubscriptionAsync(id);
+        return Ok(recordings);
+    }
+
+    /// <summary>
+    /// Organizes existing recordings by moving them to the sports folder.
+    /// </summary>
+    [HttpPost("Library/Organize")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<OrganizeRecordingsResponse>> OrganizeRecordings()
+    {
+        var result = await _libraryService.OrganizeExistingRecordingsAsync();
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Checks if a file is safe to move (for post-processing script integration).
+    /// </summary>
+    [HttpGet("Library/CheckFile/{itemId}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<FileSafetyCheckDto> CheckFileSafety([FromRoute] string itemId)
+    {
+        if (!Guid.TryParse(itemId, out var guid))
+        {
+            return BadRequest("Invalid item ID format");
+        }
+
+        var item = _libraryService.GetItemById(guid);
+        if (item == null)
+        {
+            return NotFound();
+        }
+
+        var isSafe = _libraryService.IsFileSafeToMove(item);
+        var fileAge = _libraryService.GetFileAge(item);
+
+        return Ok(new FileSafetyCheckDto
+        {
+            ItemId = guid,
+            IsSafeToMove = isSafe,
+            Reason = isSafe ? "File is safe to move" : "File is in use or too recent",
+            FileAgeMinutes = fileAge.TotalMinutes
+        });
     }
 }
 

@@ -60,4 +60,29 @@ public class PluginConfiguration : BasePluginConfiguration
     /// When true, "Man City" will match a "Manchester City" subscription.
     /// </summary>
     public bool EnableAliasMatching { get; set; }
+
+    /// <summary>
+    /// Gets or sets the Jellyfin library name for sports recordings.
+    /// Default: "Sports DVR"
+    /// </summary>
+    public string SportsLibraryName { get; set; } = "Sports DVR";
+
+    /// <summary>
+    /// Gets or sets the path where post-processed sports recordings should be stored.
+    /// Default: /mnt/movies/hyperdata/dvr/sports-dvr/
+    /// </summary>
+    public string SportsRecordingsPath { get; set; } = "/mnt/movies/hyperdata/dvr/sports-dvr/";
+
+    /// <summary>
+    /// Gets or sets the folder organization strategy for sports recordings.
+    /// Options: "Subscription" (by team/league/event), "Date" (by date), "League" (by league then date), "None" (flat structure)
+    /// Default: "League"
+    /// </summary>
+    public string FolderOrganization { get; set; } = "League";
+
+    /// <summary>
+    /// Gets or sets whether to automatically organize recordings into sports folder.
+    /// If true, plugin will move matching recordings to SportsRecordingsPath.
+    /// </summary>
+    public bool AutoOrganizeRecordings { get; set; } = false;
 }

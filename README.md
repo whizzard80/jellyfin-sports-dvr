@@ -1,4 +1,6 @@
-# Jellyfin Sports DVR
+# Jellyfin Automatic Sports DVR
+## Schedules teams, leagues, or events from your EPG data
+
 
 A Jellyfin plugin for smart sports recording with team subscriptions and automatic scheduling.
 
@@ -128,6 +130,64 @@ When slots are full, higher priority subscriptions preempt lower ones.
 | `/SportsDVR/Subscriptions/{id}` | DELETE | Delete subscription |
 | `/SportsDVR/Status` | GET | Plugin status |
 | `/SportsDVR/Aliases` | GET/POST | Manage team aliases |
+| `/SportsDVR/Library/CheckFile/{itemId}` | GET | Check if file is safe to move (for post-processing scripts) |
+
+## Post-Processing Script Integration
+
+If you use a post-processing script with Jellyfin (for transcoding, commercial skipping, etc.), you can integrate it with Sports DVR to prevent moving files that are in use.
+
+### Option 1: Use Plugin API (Recommended)
+
+The plugin provides an API endpoint to check if a file is safe to move:
+
+```bash
+#!/bin/bash
+# Example: Check if file is safe before moving
+
+RECORDING_PATH="$1"
+JELLYFIN_URL="http://localhost:8096"
+API_KEY="your-jellyfin-api-key"
+
+# Extract item ID from recording (you'll need to parse this from Jellyfin metadata)
+ITEM_ID="..." # Get from Jellyfin recording info
+
+# Check if plugin says file is safe to move
+RESPONSE=$(curl -s -H "X-Emby-Token: $API_KEY" \
+    "$JELLYFIN_URL/SportsDVR/Library/CheckFile/$ITEM_ID")
+
+if echo "$RESPONSE" | grep -q '"isSafeToMove":true'; then
+    # File is safe, proceed with post-processing
+    # ... your transcoding/moving logic here ...
+else
+    echo "File is in use or too recent, skipping post-processing..."
+    exit 0
+fi
+```
+
+### Option 2: Check File Locks Directly
+
+Alternatively, check if the file is locked before moving:
+
+```bash
+#!/bin/bash
+# Check if file is in use before moving
+
+RECORDING_PATH="$1"
+
+# Method 1: Use lsof
+if lsof "$RECORDING_PATH" >/dev/null 2>&1; then
+    echo "File is in use, skipping..."
+    exit 0
+fi
+
+# Method 2: Use flock
+(
+    flock -n 9 || exit 1
+    # Move/transcode file here
+) 9>"$RECORDING_PATH.lock"
+```
+
+**Note**: Post-processing script integration is optional. If you don't use post-processing scripts, the plugin's organization feature will handle everything automatically with built-in safeguards (1.5 hour delay, playback checks, file lock detection).
 
 ## Building from Source
 
