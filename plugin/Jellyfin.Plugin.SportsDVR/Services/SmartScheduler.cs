@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using Jellyfin.Plugin.SportsDVR.Models;
 using Microsoft.Extensions.Logging;
 
@@ -134,32 +135,189 @@ public class SmartScheduler
 
     /// <summary>
     /// Determines if two programs are the same game on different channels.
+    /// Accounts for delayed feeds (up to 2 hours apart) and different title formats.
     /// </summary>
     private bool IsSameGame(MatchedProgram a, MatchedProgram b)
     {
-        // Different times = different games
-        var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
-        if (timeDiff > 30) // Allow 30 min tolerance for different broadcast schedules
-        {
-            return false;
-        }
-
-        // Check if same teams
+        // Check if same teams first (most reliable)
         var teamsA = GetNormalizedTeams(a);
         var teamsB = GetNormalizedTeams(b);
 
-        if (teamsA.Count == 2 && teamsB.Count == 2)
+        if (teamsA.Count >= 2 && teamsB.Count >= 2)
         {
             // Both have two teams - check if same matchup
-            return teamsA.SetEquals(teamsB);
+            if (teamsA.SetEquals(teamsB))
+            {
+                // Same teams - allow up to 3 hours difference for delayed feeds/replays
+                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
+                if (timeDiff <= 180)
+                {
+                    _logger.LogDebug(
+                        "Same game detected: '{TitleA}' and '{TitleB}' ({TimeDiff} min apart)",
+                        a.Program.Name, b.Program.Name, timeDiff);
+                    return true;
+                }
+            }
+            // Different teams = different game
+            return false;
         }
 
-        // Fall back to title similarity
+        // Try to extract teams from title if ScoredProgram didn't have them
+        var extractedTeamsA = ExtractTeamsFromTitle(a.Program.Name ?? "");
+        var extractedTeamsB = ExtractTeamsFromTitle(b.Program.Name ?? "");
+        
+        if (extractedTeamsA.Count >= 2 && extractedTeamsB.Count >= 2)
+        {
+            if (TeamsMatch(extractedTeamsA, extractedTeamsB))
+            {
+                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
+                if (timeDiff <= 180)
+                {
+                    _logger.LogDebug(
+                        "Same game detected (title match): '{TitleA}' and '{TitleB}'",
+                        a.Program.Name, b.Program.Name);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Fall back to title similarity for non-team sports (UFC, etc.)
         var titleA = NormalizeTitle(a.Program.Name ?? "");
         var titleB = NormalizeTitle(b.Program.Name ?? "");
+        
+        var similarity = CalculateSimilarity(titleA, titleB);
+        if (similarity > 0.8) // Higher threshold for title-only matching
+        {
+            var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
+            if (timeDiff <= 180)
+            {
+                _logger.LogDebug(
+                    "Same event detected (similarity {Sim:P0}): '{TitleA}' and '{TitleB}'",
+                    similarity, a.Program.Name, b.Program.Name);
+                return true;
+            }
+        }
 
-        // Check for high similarity (same core matchup)
-        return CalculateSimilarity(titleA, titleB) > 0.7;
+        return false;
+    }
+
+    /// <summary>
+    /// Extracts team names from a title using common patterns.
+    /// </summary>
+    private static List<string> ExtractTeamsFromTitle(string title)
+    {
+        var teams = new List<string>();
+        
+        // Remove ALL common prefixes and noise (may be multiple: "Live: NBA: ...")
+        var cleaned = title;
+        
+        // Patterns to remove from ANYWHERE (not just start)
+        var noisePatterns = new[] {
+            @"\blive\s*[:\-]?\s*",
+            @"\bnew\s*[:\-]?\s*",
+            @"\bnba\s*[:\-]?\s*",
+            @"\bnfl\s*[:\-]?\s*",
+            @"\bnhl\s*[:\-]?\s*",
+            @"\bmlb\s*[:\-]?\s*",
+            @"\bpl\s*[:\-]?\s*",
+            @"\bserie\s*a\s*[:\-]?\s*",
+            @"\bmma\s*[:\-]?\s*",
+            @"\bufc\s+\d+\s*[:\-]?\s*",       // UFC 325:
+            @"\bcarabao\s*[:\-]?\s*",          // Carabao
+            @"\bfa\s*cup\s*[:\-]?\s*",         // FA Cup
+            @"\d{2}/\d{2}\s*[:\-]?\s*",        // 25/26:
+            @"\bsf\d+\s*",                     // SF1, SF2 (semifinal)
+            @"\bmw\d+\s*[:\-]?\s*",            // MW24: (matchweek)
+        };
+        
+        foreach (var pattern in noisePatterns)
+        {
+            cleaned = Regex.Replace(cleaned, pattern, "", RegexOptions.IgnoreCase);
+        }
+        
+        cleaned = cleaned.Trim();
+        
+        // Match "Team1 vs/v/@/at Team2"
+        var match = Regex.Match(cleaned, @"(.+?)\s+(?:vs\.?|v\.?|@|at)\s+(.+?)(?:\s*[;\(\[]|$)", RegexOptions.IgnoreCase);
+        if (match.Success)
+        {
+            teams.Add(NormalizeTeamName(match.Groups[1].Value));
+            teams.Add(NormalizeTeamName(match.Groups[2].Value));
+        }
+        
+        // Also handle UFC events: "UFC 325: Volkanovski vs. Lopes 2" → ["Volkanovski", "Lopes"]
+        if (teams.Count == 0)
+        {
+            var ufcMatch = Regex.Match(title, @"UFC\s+\d+\s*:\s*(.+?)\s+(?:vs\.?|v\.?)\s+(.+?)(?:\s+\d+)?$", RegexOptions.IgnoreCase);
+            if (ufcMatch.Success)
+            {
+                teams.Add(NormalizeTeamName(ufcMatch.Groups[1].Value));
+                teams.Add(NormalizeTeamName(ufcMatch.Groups[2].Value));
+            }
+        }
+        
+        return teams;
+    }
+
+    /// <summary>
+    /// Normalizes a team name for comparison.
+    /// Removes city prefixes to match "Celtics" with "Boston Celtics".
+    /// </summary>
+    private static string NormalizeTeamName(string team)
+    {
+        var normalized = team
+            .Trim()
+            .ToLowerInvariant()
+            .Replace(".", "")
+            .Replace(",", "");
+        
+        // Remove common city prefixes for better matching
+        // "Boston Celtics" → "celtics", "Dallas Mavericks" → "mavericks"
+        var cityPrefixes = new[] {
+            "boston", "dallas", "los angeles", "la", "new york", "ny",
+            "golden state", "san antonio", "oklahoma city", "portland",
+            "minnesota", "milwaukee", "miami", "chicago", "detroit",
+            "cleveland", "atlanta", "charlotte", "washington", "toronto",
+            "brooklyn", "philadelphia", "phoenix", "denver", "utah",
+            "sacramento", "orlando", "indiana", "new orleans", "memphis",
+            "houston", "san francisco", "seattle", "manchester", "arsenal",
+            "chelsea", "liverpool", "tottenham", "brighton", "aston villa",
+            "newcastle", "west ham", "everton", "nottingham", "leeds",
+            "wolverhampton", "crystal palace", "brentford", "fulham",
+            "ac", "inter", "juventus", "napoli", "roma", "lazio", "fiorentina",
+            "real madrid", "barcelona", "atletico", "sevilla", "villarreal",
+            "bayern", "borussia"
+        };
+        
+        foreach (var prefix in cityPrefixes)
+        {
+            if (normalized.StartsWith(prefix + " "))
+            {
+                var remainder = normalized.Substring(prefix.Length).Trim();
+                if (!string.IsNullOrEmpty(remainder))
+                {
+                    normalized = remainder;
+                    break;
+                }
+            }
+        }
+        
+        return normalized;
+    }
+
+    /// <summary>
+    /// Checks if two team lists represent the same matchup.
+    /// </summary>
+    private bool TeamsMatch(List<string> teamsA, List<string> teamsB)
+    {
+        if (teamsA.Count < 2 || teamsB.Count < 2) return false;
+        
+        // Normalize using alias service
+        var normA = teamsA.Select(t => _aliasService.ResolveAlias(t)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var normB = teamsB.Select(t => _aliasService.ResolveAlias(t)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        
+        return normA.SetEquals(normB);
     }
 
     /// <summary>
