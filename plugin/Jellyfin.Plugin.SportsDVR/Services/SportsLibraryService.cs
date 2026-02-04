@@ -252,6 +252,17 @@ public class SportsLibraryService
                     // Determine destination folder
                     var destFolder = GetDestinationFolderFromScored(config, scored, matchedSub, DateTime.UtcNow);
                     
+                    // Try to extract teams from original filename if scorer didn't find them
+                    var (extractedTeam1, extractedTeam2) = ExtractTeamsFromFilename(fileInfo.Name);
+                    if (string.IsNullOrEmpty(scored.Team1) && !string.IsNullOrEmpty(extractedTeam1))
+                    {
+                        scored.Team1 = extractedTeam1;
+                    }
+                    if (string.IsNullOrEmpty(scored.Team2) && !string.IsNullOrEmpty(extractedTeam2))
+                    {
+                        scored.Team2 = extractedTeam2;
+                    }
+                    
                     // Generate clean filename with periods instead of spaces
                     var cleanFilename = GenerateCleanFilename(scored, matchedSub, fileInfo.Extension, DateTime.UtcNow);
                     var destFilePath = Path.Combine(destBasePath, destFolder, cleanFilename);
@@ -283,6 +294,9 @@ public class SportsLibraryService
                     result.Moved++;
 
                     _logger.LogInformation("✅ Moved: {Name} -> {Dest}", fileInfo.Name, destFilePath);
+
+                    // Create metadata sidecar file with recording info
+                    CreateMetadataSidecar(destFilePath, scored, matchedSub, fileInfo.Name);
 
                     // Update Jellyfin metadata if item exists in library
                     if (baseItem != null)
@@ -618,6 +632,112 @@ public class SportsLibraryService
         } while (File.Exists(newPath) && counter < 1000);
         
         return newPath;
+    }
+
+    /// <summary>
+    /// Extracts team names from original filename patterns like:
+    /// MLB.Baseball.2025_08_02_16_00_00.-.Houston.Astros.vs.Tigers.mp4
+    /// </summary>
+    private static (string? Team1, string? Team2) ExtractTeamsFromFilename(string filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return (null, null);
+        
+        // Remove extension
+        var name = Path.GetFileNameWithoutExtension(filename);
+        
+        // Try to find "vs" or "at" or "@" patterns
+        var vsMatch = Regex.Match(name, @"[._\-]([A-Za-z]+(?:\.[A-Za-z]+)?)\s*(?:vs\.?|at|@)\s*([A-Za-z]+(?:\.[A-Za-z]+)?)", RegexOptions.IgnoreCase);
+        if (vsMatch.Success)
+        {
+            var team1 = CleanExtractedTeamName(vsMatch.Groups[1].Value);
+            var team2 = CleanExtractedTeamName(vsMatch.Groups[2].Value);
+            return (team1, team2);
+        }
+        
+        // Try to extract team after timestamp pattern like "2025_08_02_16_00_00.-."
+        var afterTimestamp = Regex.Match(name, @"\d{4}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[_\-]\d{2}[._\-]+(.+)", RegexOptions.IgnoreCase);
+        if (afterTimestamp.Success)
+        {
+            var teamPart = afterTimestamp.Groups[1].Value;
+            // Check if it has "vs" in it
+            var vsInPart = Regex.Match(teamPart, @"([A-Za-z][A-Za-z\s\.]+?)\s*(?:vs\.?|at|@)\s*([A-Za-z][A-Za-z\s\.]+)", RegexOptions.IgnoreCase);
+            if (vsInPart.Success)
+            {
+                var team1 = CleanExtractedTeamName(vsInPart.Groups[1].Value);
+                var team2 = CleanExtractedTeamName(vsInPart.Groups[2].Value);
+                return (team1, team2);
+            }
+            
+            // Just extract the first recognizable team name
+            var singleTeam = Regex.Match(teamPart, @"^[._\-]*([A-Za-z][A-Za-z\s\.]{2,20})", RegexOptions.IgnoreCase);
+            if (singleTeam.Success)
+            {
+                var team = CleanExtractedTeamName(singleTeam.Groups[1].Value);
+                return (team, null);
+            }
+        }
+        
+        return (null, null);
+    }
+
+    /// <summary>
+    /// Cleans an extracted team name.
+    /// </summary>
+    private static string CleanExtractedTeamName(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return name;
+        
+        // Replace dots/underscores with spaces
+        name = name.Replace(".", " ").Replace("_", " ");
+        
+        // Trim and collapse multiple spaces
+        name = Regex.Replace(name.Trim(), @"\s+", " ");
+        
+        // Remove trailing partial words (like "Re" from "Red Sox" truncated)
+        name = Regex.Replace(name, @"\s+[A-Z][a-z]?$", "");
+        
+        return name.Trim();
+    }
+
+    /// <summary>
+    /// Creates a metadata sidecar file (.nfo) with recording information.
+    /// </summary>
+    private void CreateMetadataSidecar(string videoFilePath, ScoredProgram scored, Subscription? subscription, string originalFilename)
+    {
+        try
+        {
+            var nfoPath = Path.ChangeExtension(videoFilePath, ".nfo");
+            
+            var content = $@"<?xml version=""1.0"" encoding=""UTF-8""?>
+<recording>
+    <title>{EscapeXml(Path.GetFileNameWithoutExtension(videoFilePath))}</title>
+    <originaltitle>{EscapeXml(originalFilename)}</originaltitle>
+    <league>{EscapeXml(scored.DetectedLeague ?? "Unknown")}</league>
+    <team1>{EscapeXml(scored.Team1 ?? "")}</team1>
+    <team2>{EscapeXml(scored.Team2 ?? "")}</team2>
+    <subscription>{EscapeXml(subscription?.Name ?? "")}</subscription>
+    <score>{scored.Score}</score>
+    <dateorganized>{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}</dateorganized>
+</recording>";
+            
+            File.WriteAllText(nfoPath, content);
+            _logger.LogDebug("Created metadata sidecar: {Path}", nfoPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to create metadata sidecar for {File}", videoFilePath);
+        }
+    }
+
+    private static string EscapeXml(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        return text
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;")
+            .Replace("'", "&apos;");
     }
 
     /// <summary>
