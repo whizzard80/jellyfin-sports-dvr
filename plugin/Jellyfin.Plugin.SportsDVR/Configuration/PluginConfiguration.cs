@@ -68,7 +68,15 @@ public class PluginConfiguration : BasePluginConfiguration
     public string SportsLibraryName { get; set; } = "Sports DVR";
 
     /// <summary>
-    /// Gets or sets the path where post-processed sports recordings should be stored.
+    /// Gets or sets the path where DVR/post-processor dumps all recordings (SOURCE).
+    /// This is where the organize function looks for sports games to move.
+    /// Default: /mnt/movies/hyperdata/dvr/
+    /// </summary>
+    public string DvrRecordingsPath { get; set; } = "/mnt/movies/hyperdata/dvr/";
+
+    /// <summary>
+    /// Gets or sets the path where sports recordings should be moved to (DESTINATION).
+    /// Sports games found in DvrRecordingsPath will be moved here.
     /// Default: /mnt/movies/hyperdata/dvr/sports-dvr/
     /// </summary>
     public string SportsRecordingsPath { get; set; } = "/mnt/movies/hyperdata/dvr/sports-dvr/";

@@ -332,17 +332,26 @@
                     <!-- Library Organization -->
                     <fieldset class="verticalSection">
                         <legend>Library Organization</legend>
+                        <p class="fieldDescription" style="margin-bottom: 1em;">
+                            Configure paths for organizing sports recordings. The plugin can move sports games from your general DVR folder to a dedicated sports folder.
+                        </p>
                         
                         <div class="inputContainer">
                             <label class="inputLabel" for="sportsLibraryName">Sports Library Name</label>
                             <input type="text" id="sportsLibraryName" is="emby-input" placeholder="Sports DVR">
-                            <div class="fieldDescription">Name of Jellyfin library containing sports recordings</div>
+                            <div class="fieldDescription">Name of Jellyfin library for viewing sports recordings</div>
                         </div>
                         
                         <div class="inputContainer">
-                            <label class="inputLabel" for="sportsRecordingsPath">Sports Recordings Path</label>
+                            <label class="inputLabel" for="dvrRecordingsPath">DVR Recordings Path (Source)</label>
+                            <input type="text" id="dvrRecordingsPath" is="emby-input" placeholder="/mnt/movies/hyperdata/dvr/">
+                            <div class="fieldDescription">Where Jellyfin DVR and post-processor dump all recordings. Sports games will be scanned from here.</div>
+                        </div>
+                        
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="sportsRecordingsPath">Sports DVR Path (Destination)</label>
                             <input type="text" id="sportsRecordingsPath" is="emby-input" placeholder="/mnt/movies/hyperdata/dvr/sports-dvr/">
-                            <div class="fieldDescription">Path where sports recordings are stored (or should be moved to)</div>
+                            <div class="fieldDescription">Where sports games will be moved to. Should match your Sports DVR library path.</div>
                         </div>
                         
                         <div class="inputContainer">
@@ -409,6 +418,7 @@
                         document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
                         document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
                         document.getElementById('sportsLibraryName').value = config.SportsLibraryName || 'Sports DVR';
+                        document.getElementById('dvrRecordingsPath').value = config.DvrRecordingsPath || '/mnt/movies/hyperdata/dvr/';
                         document.getElementById('sportsRecordingsPath').value = config.SportsRecordingsPath || '/mnt/movies/hyperdata/dvr/sports-dvr/';
                         document.getElementById('folderOrganization').value = config.FolderOrganization || 'League';
                         document.getElementById('autoOrganizeRecordings').checked = config.AutoOrganizeRecordings || false;
@@ -426,6 +436,7 @@
                         config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
                         config.SportsLibraryName = document.getElementById('sportsLibraryName').value || 'Sports DVR';
+                        config.DvrRecordingsPath = document.getElementById('dvrRecordingsPath').value || '/mnt/movies/hyperdata/dvr/';
                         config.SportsRecordingsPath = document.getElementById('sportsRecordingsPath').value || '/mnt/movies/hyperdata/dvr/sports-dvr/';
                         config.FolderOrganization = document.getElementById('folderOrganization').value || 'League';
                         config.AutoOrganizeRecordings = document.getElementById('autoOrganizeRecordings').checked;

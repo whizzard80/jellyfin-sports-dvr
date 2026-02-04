@@ -141,7 +141,8 @@ public class SportsLibraryService
     }
 
     /// <summary>
-    /// Organizes existing recordings by moving them to the sports folder.
+    /// Organizes existing recordings by moving them from the DVR folder to the sports folder.
+    /// Scans DvrRecordingsPath (source) and moves sports games to SportsRecordingsPath (destination).
     /// </summary>
     public Task<OrganizeRecordingsResponse> OrganizeExistingRecordingsAsync()
     {
@@ -153,102 +154,143 @@ public class SportsLibraryService
             return Task.FromResult(result);
         }
 
+        var sourcePath = config.DvrRecordingsPath;
+        var destBasePath = config.SportsRecordingsPath;
+
+        if (string.IsNullOrEmpty(sourcePath))
+        {
+            result.Errors.Add("DVR Recordings Path (source) not configured");
+            return Task.FromResult(result);
+        }
+
+        if (string.IsNullOrEmpty(destBasePath))
+        {
+            result.Errors.Add("Sports DVR Path (destination) not configured");
+            return Task.FromResult(result);
+        }
+
+        if (!Directory.Exists(sourcePath))
+        {
+            result.Errors.Add($"DVR Recordings Path does not exist: {sourcePath}");
+            return Task.FromResult(result);
+        }
+
+        _logger.LogInformation("Organizing recordings from {Source} to {Dest}", sourcePath, destBasePath);
+
         try
         {
-            // Query all video items
-            var query = new InternalItemsQuery
-            {
-                Recursive = true,
-                IsVirtualItem = false
-            };
+            // Ensure destination exists
+            Directory.CreateDirectory(destBasePath);
 
-            var items = _libraryManager.GetItemsResult(query);
-            result.Scanned = items.TotalRecordCount;
+            // Scan files directly from the DVR folder (not Jellyfin library - may not be indexed yet)
+            var videoExtensions = new[] { ".ts", ".mp4", ".mkv", ".avi", ".m4v", ".mov", ".mpg", ".mpeg" };
+            var files = Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories)
+                .Where(f => videoExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                .Where(f => !f.StartsWith(destBasePath, StringComparison.OrdinalIgnoreCase)) // Skip files already in sports folder
+                .ToList();
 
-            foreach (var baseItem in items.Items)
+            result.Scanned = files.Count;
+            _logger.LogInformation("Found {Count} video files to scan", files.Count);
+
+            foreach (var filePath in files)
             {
                 try
                 {
-                    if (baseItem is not Video)
-                    {
-                        continue;
-                    }
-
-                    // Check if already in sports folder
-                    var sourcePath = baseItem.Path;
-                    if (string.IsNullOrEmpty(sourcePath) || !File.Exists(sourcePath))
-                    {
-                        continue;
-                    }
-
-                    if (sourcePath.StartsWith(config.SportsRecordingsPath, StringComparison.OrdinalIgnoreCase))
+                    // Skip files already in sports folder
+                    if (filePath.StartsWith(destBasePath, StringComparison.OrdinalIgnoreCase))
                     {
                         result.Skipped++;
                         continue;
                     }
 
-                    // Safety check: Skip if file is too new or in use
-                    if (ShouldSkipFile(baseItem))
+                    // Safety check: Skip if file is too new (< 1.5 hours old)
+                    var fileInfo = new FileInfo(filePath);
+                    var fileAge = DateTime.UtcNow - fileInfo.LastWriteTimeUtc;
+                    if (fileAge.TotalMinutes < 90)
                     {
                         result.Skipped++;
-                        _logger.LogInformation("Skipping file in use or too new: {Name}", baseItem.Name);
+                        _logger.LogDebug("Skipping file too new (age: {Age} min): {Name}", fileAge.TotalMinutes, fileInfo.Name);
                         continue;
                     }
+
+                    // Check if file is in use
+                    if (IsFileInUse(filePath))
+                    {
+                        result.Skipped++;
+                        _logger.LogDebug("Skipping file in use: {Name}", fileInfo.Name);
+                        continue;
+                    }
+
+                    // Try to find the item in Jellyfin library for better metadata
+                    var baseItem = FindJellyfinItemByPath(filePath);
+                    
+                    // Get title from filename or Jellyfin item
+                    var title = baseItem?.Name ?? Path.GetFileNameWithoutExtension(filePath);
+                    var overview = baseItem?.Overview ?? "";
 
                     // Score the program to detect if it's a sports game
-                    var title = baseItem.Name ?? "";
-                    var overview = baseItem.Overview ?? "";
-                    var channelName = "";
-                    
-                    var scored = _sportsScorer.Score(title, channelName, overview);
+                    var scored = _sportsScorer.Score(title, "", overview);
                     
                     // Match to subscription
-                    var matchedSub = FindMatchingSubscription(baseItem, scored);
+                    var matchedSub = FindMatchingSubscriptionByTitle(title, scored);
 
                     // Only move if it matches a subscription OR scores as likely/possible sports
                     if (matchedSub == null && scored.Score < SportsScorer.THRESHOLD_POSSIBLE_GAME)
                     {
+                        _logger.LogDebug("Not a sports game (score {Score}): {Title}", scored.Score, title);
                         continue;
                     }
 
                     result.Matched++;
+                    _logger.LogInformation("Matched sports game: {Title} (score: {Score}, subscription: {Sub})", 
+                        title, scored.Score, matchedSub?.Name ?? "none");
 
                     // Determine destination folder
-                    var destFolder = GetDestinationFolder(config, baseItem, scored, matchedSub);
-                    var filename = Path.GetFileName(sourcePath);
-                    var destPath = Path.Combine(config.SportsRecordingsPath, destFolder, filename);
+                    var destFolder = GetDestinationFolderFromScored(config, scored, matchedSub, DateTime.UtcNow);
+                    var destFilePath = Path.Combine(destBasePath, destFolder, fileInfo.Name);
 
                     // Ensure destination directory exists
-                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+                    Directory.CreateDirectory(Path.GetDirectoryName(destFilePath)!);
 
-                    // Final check: Ensure file is not in use right now
-                    if (IsFileInUse(sourcePath) || IsItemCurrentlyPlaying(baseItem.Id))
+                    // Final safety check
+                    if (IsFileInUse(filePath))
                     {
                         result.Skipped++;
-                        _logger.LogWarning("File is currently in use, skipping: {Name}", baseItem.Name);
+                        _logger.LogWarning("File became in use, skipping: {Name}", fileInfo.Name);
+                        continue;
+                    }
+
+                    // Check if Jellyfin is playing this item
+                    if (baseItem != null && IsItemCurrentlyPlaying(baseItem.Id))
+                    {
+                        result.Skipped++;
+                        _logger.LogWarning("Item is being played, skipping: {Name}", title);
                         continue;
                     }
 
                     // Move file
-                    File.Move(sourcePath, destPath);
+                    File.Move(filePath, destFilePath);
                     result.Moved++;
 
-                    // Update Jellyfin metadata with clean title
-                    var cleanTitle = GenerateCleanTitle(baseItem, scored, matchedSub);
-                    var cleanDescription = RemoveSpoilers(overview);
-                    if (!string.IsNullOrEmpty(cleanTitle) && cleanTitle != baseItem.Name)
-                    {
-                        UpdateItemMetadata(baseItem, cleanTitle, cleanDescription);
-                    }
+                    _logger.LogInformation("✅ Moved: {Name} -> {Dest}", fileInfo.Name, destFilePath);
 
-                    _logger.LogInformation("Moved sports recording: {Name} -> {Dest}", baseItem.Name, destPath);
+                    // Update Jellyfin metadata if item exists in library
+                    if (baseItem != null)
+                    {
+                        var cleanTitle = GenerateCleanTitleFromScored(scored, matchedSub, DateTime.UtcNow);
+                        var cleanDescription = RemoveSpoilers(overview);
+                        if (!string.IsNullOrEmpty(cleanTitle) && cleanTitle != baseItem.Name)
+                        {
+                            UpdateItemMetadata(baseItem, cleanTitle, cleanDescription);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
                     result.Failed++;
-                    var errorMsg = $"Failed to process {baseItem.Name}: {ex.Message}";
+                    var errorMsg = $"Failed to process {Path.GetFileName(filePath)}: {ex.Message}";
                     result.Errors.Add(errorMsg);
-                    _logger.LogError(ex, "Error organizing recording: {Name}", baseItem.Name);
+                    _logger.LogError(ex, "Error organizing file: {Path}", filePath);
                 }
             }
         }
@@ -258,7 +300,132 @@ public class SportsLibraryService
             result.Errors.Add($"Organization failed: {ex.Message}");
         }
 
+        _logger.LogInformation("Organization complete: Scanned={Scanned}, Matched={Matched}, Moved={Moved}, Skipped={Skipped}, Failed={Failed}",
+            result.Scanned, result.Matched, result.Moved, result.Skipped, result.Failed);
+
         return Task.FromResult(result);
+    }
+
+    /// <summary>
+    /// Finds a Jellyfin library item by its file path.
+    /// </summary>
+    private BaseItem? FindJellyfinItemByPath(string filePath)
+    {
+        try
+        {
+            var query = new InternalItemsQuery
+            {
+                Recursive = true,
+                IsVirtualItem = false
+            };
+
+            var items = _libraryManager.GetItemsResult(query);
+            return items.Items.FirstOrDefault(i => 
+                !string.IsNullOrEmpty(i.Path) && 
+                i.Path.Equals(filePath, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error finding Jellyfin item by path: {Path}", filePath);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Finds a matching subscription by title.
+    /// </summary>
+    private Subscription? FindMatchingSubscriptionByTitle(string title, ScoredProgram scored)
+    {
+        var subscriptions = _subscriptionManager.GetAll().Where(s => s.Enabled).ToList();
+        
+        foreach (var subscription in subscriptions)
+        {
+            var parsed = new ParsedProgram
+            {
+                OriginalTitle = title,
+                Team1 = scored.Team1,
+                Team2 = scored.Team2,
+                League = scored.DetectedLeague,
+                IsReplay = scored.IsReplay
+            };
+
+            if (_patternMatcher.Matches(parsed, subscription))
+            {
+                return subscription;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets destination folder from scored program data.
+    /// </summary>
+    private string GetDestinationFolderFromScored(PluginConfiguration config, ScoredProgram scored, Subscription? subscription, DateTime date)
+    {
+        switch (config.FolderOrganization.ToLowerInvariant())
+        {
+            case "subscription":
+                if (subscription != null)
+                {
+                    return SanitizeFolderName(subscription.Name);
+                }
+                if (!string.IsNullOrEmpty(scored.DetectedLeague))
+                {
+                    return SanitizeFolderName(scored.DetectedLeague);
+                }
+                if (!string.IsNullOrEmpty(scored.Team1))
+                {
+                    return SanitizeFolderName(scored.Team1);
+                }
+                return "Other";
+                
+            case "date":
+                return date.ToString("yyyy-MM-dd");
+                
+            case "league":
+                var league = scored.DetectedLeague ?? subscription?.Name ?? "Other";
+                return Path.Combine(SanitizeFolderName(league), date.ToString("yyyy-MM-dd"));
+                
+            case "league_date":
+                var league2 = scored.DetectedLeague ?? subscription?.Name ?? "Other";
+                return $"{SanitizeFolderName(league2)}_{date:yyyy-MM-dd}";
+                
+            default:
+                return "";
+        }
+    }
+
+    /// <summary>
+    /// Generates a clean title from scored data.
+    /// </summary>
+    private string GenerateCleanTitleFromScored(ScoredProgram scored, Subscription? subscription, DateTime date)
+    {
+        var team1 = scored.Team1 ?? "";
+        var team2 = scored.Team2 ?? "";
+        var dateStr = date.ToString("MMM d, yyyy");
+        
+        // Remove city prefixes for cleaner display
+        team1 = RemoveCityPrefix(team1);
+        team2 = RemoveCityPrefix(team2);
+        
+        if (!string.IsNullOrEmpty(team1) && !string.IsNullOrEmpty(team2))
+        {
+            return $"{team1} vs {team2} - {dateStr}";
+        }
+        
+        // Fallback: Use subscription name or league
+        if (subscription != null)
+        {
+            return $"{subscription.Name} - {dateStr}";
+        }
+        
+        if (!string.IsNullOrEmpty(scored.DetectedLeague))
+        {
+            return $"{scored.DetectedLeague} - {dateStr}";
+        }
+        
+        return $"Sports Recording - {dateStr}";
     }
 
     /// <summary>
