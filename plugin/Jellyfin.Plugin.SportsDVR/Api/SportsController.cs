@@ -2,12 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.SportsDVR.Models;
 using Jellyfin.Plugin.SportsDVR.Services;
+using MediaBrowser.Controller.Dto;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.LiveTv;
+using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -401,6 +405,286 @@ public class SportsController : ControllerBase
                 Success = false,
                 Message = $"Clear failed: {ex.Message}"
             });
+        }
+    }
+
+    // ==================== EPG ANALYSIS ====================
+
+    /// <summary>
+    /// Scores a single program title to determine if it's a sports game.
+    /// Useful for testing matching logic.
+    /// </summary>
+    [HttpPost("Analysis/ScoreTitle")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<ScoreTitleResponse> ScoreTitle([FromBody] ScoreTitleRequest request)
+    {
+        var result = _sportsScorer.Score(
+            request.Title, 
+            request.Channel, 
+            request.Description, 
+            request.HasSportsCategory);
+
+        return Ok(new ScoreTitleResponse
+        {
+            Title = request.Title,
+            Score = result.Score,
+            IsLikelyGame = result.IsLikelyGame,
+            IsPossibleGame = result.IsPossibleGame,
+            CleanTitle = result.CleanTitle,
+            Team1 = result.Team1,
+            Team2 = result.Team2,
+            DetectedLeague = result.DetectedLeague,
+            IsReplay = result.IsReplay,
+            HasMatchupPattern = result.HasMatchupPattern,
+            IsSportsChannel = result.IsSportsChannel,
+            IsPregamePostgame = result.IsPregamePostgame
+        });
+    }
+
+    /// <summary>
+    /// Analyzes the current EPG and returns statistics on sports detection.
+    /// </summary>
+    [HttpGet("Analysis/EpgStats")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<EpgAnalysisResponse>> AnalyzeEpg(
+        [FromQuery] int minScore = 30,
+        [FromQuery] int hours = 48)
+    {
+        var response = new EpgAnalysisResponse();
+
+        try
+        {
+            // Get channels using the correct API
+            var channelQuery = new LiveTvChannelQuery { };
+            var dtoOptions = new DtoOptions();
+            var channels = _liveTvManager.GetInternalChannels(channelQuery, dtoOptions, CancellationToken.None);
+
+            var channelMap = channels.Items
+                .ToDictionary(c => c.Id.ToString("N"), c => c.Name ?? "Unknown");
+
+            // Get programs for each channel
+            var now = DateTime.UtcNow;
+            var endDate = now.AddHours(hours);
+            var scoredResults = new List<ScoredProgramResult>();
+            var leagueCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var scoreDistribution = new Dictionary<string, int>
+            {
+                ["< 0 (Not sports)"] = 0,
+                ["0-29 (Unlikely)"] = 0,
+                ["30-49 (Possible)"] = 0,
+                ["50-69 (Probable)"] = 0,
+                ["70+ (Definite)"] = 0
+            };
+            int totalPrograms = 0;
+
+            foreach (var channel in channels.Items)
+            {
+                try
+                {
+                    var programQuery = new InternalItemsQuery
+                    {
+                        ChannelIds = new[] { channel.Id },
+                        MinStartDate = now,
+                        MaxStartDate = endDate
+                    };
+
+                    var programs = await _liveTvManager.GetPrograms(programQuery, dtoOptions, CancellationToken.None).ConfigureAwait(false);
+                    totalPrograms += programs.Items.Count;
+
+                    foreach (var program in programs.Items)
+                    {
+                        var title = program.Name ?? string.Empty;
+                        var channelName = channel.Name ?? "Unknown";
+                        var episodeTitle = program.EpisodeTitle ?? string.Empty;
+                        var desc = string.IsNullOrEmpty(episodeTitle) ? program.Overview : $"{episodeTitle} - {program.Overview}";
+                        
+                        var hasSportsCat = program.IsSports ?? false;
+
+                        var scored = _sportsScorer.Score(title, channelName, desc, hasSportsCat);
+
+                        // Score distribution
+                        if (scored.Score < 0)
+                            scoreDistribution["< 0 (Not sports)"]++;
+                        else if (scored.Score < 30)
+                            scoreDistribution["0-29 (Unlikely)"]++;
+                        else if (scored.Score < 50)
+                            scoreDistribution["30-49 (Possible)"]++;
+                        else if (scored.Score < 70)
+                            scoreDistribution["50-69 (Probable)"]++;
+                        else
+                            scoreDistribution["70+ (Definite)"]++;
+
+                        // Track league counts for likely games
+                        if (scored.IsLikelyGame && !string.IsNullOrEmpty(scored.DetectedLeague))
+                        {
+                            leagueCounts.TryGetValue(scored.DetectedLeague, out var count);
+                            leagueCounts[scored.DetectedLeague] = count + 1;
+                        }
+
+                        // Add to results if meets threshold
+                        if (scored.Score >= minScore)
+                        {
+                            scoredResults.Add(new ScoredProgramResult
+                            {
+                                Title = title,
+                                CleanTitle = scored.CleanTitle,
+                                Channel = channelName,
+                                Score = scored.Score,
+                                IsLikelyGame = scored.IsLikelyGame,
+                                Team1 = scored.Team1,
+                                Team2 = scored.Team2,
+                                League = scored.DetectedLeague,
+                                IsReplay = scored.IsReplay,
+                                StartTime = program.StartDate ?? now
+                            });
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to get programs for channel {Channel}", channel.Name);
+                }
+            }
+
+            response.TotalPrograms = totalPrograms;
+            response.LikelyGamesCount = scoredResults.Count(s => s.IsLikelyGame);
+            response.PossibleGamesCount = scoredResults.Count(s => s.Score >= 30);
+            response.ScoreDistribution = scoreDistribution;
+            response.LeagueCounts = leagueCounts.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value);
+            response.TopScoredPrograms = scoredResults.OrderByDescending(s => s.Score).Take(50).ToList();
+            response.HoursScanned = hours;
+            response.MinScoreThreshold = minScore;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to analyze EPG");
+            response.Error = ex.Message;
+        }
+
+        return Ok(response);
+    }
+
+    /// <summary>
+    /// Tests subscription matching against current EPG data.
+    /// </summary>
+    [HttpGet("Analysis/TestSubscriptions")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<SubscriptionTestResponse>> TestSubscriptions([FromQuery] int hours = 48)
+    {
+        var response = new SubscriptionTestResponse();
+
+        try
+        {
+            var subscriptions = _subscriptionManager.GetAll().Where(s => s.Enabled).ToList();
+            response.ActiveSubscriptions = subscriptions.Count;
+
+            // Get channels using correct API
+            var channelQuery = new LiveTvChannelQuery { };
+            var dtoOptions = new DtoOptions();
+            var channels = _liveTvManager.GetInternalChannels(channelQuery, dtoOptions, CancellationToken.None);
+
+            var matchResults = new List<SubscriptionMatchResult>();
+            var now = DateTime.UtcNow;
+            var endDate = now.AddHours(hours);
+
+            // Build programs list from all channels
+            var allPrograms = new List<(string Title, string ChannelName, string EpisodeTitle)>();
+            
+            foreach (var channel in channels.Items)
+            {
+                try
+                {
+                    var programQuery = new InternalItemsQuery
+                    {
+                        ChannelIds = new[] { channel.Id },
+                        MinStartDate = now,
+                        MaxStartDate = endDate
+                    };
+
+                    var programs = await _liveTvManager.GetPrograms(programQuery, dtoOptions, CancellationToken.None).ConfigureAwait(false);
+                    
+                    foreach (var program in programs.Items)
+                    {
+                        allPrograms.Add((
+                            program.Name ?? string.Empty,
+                            channel.Name ?? "Unknown",
+                            program.EpisodeTitle ?? string.Empty
+                        ));
+                    }
+                }
+                catch
+                {
+                    // Skip failed channels
+                }
+            }
+
+            foreach (var sub in subscriptions)
+            {
+                var matchCount = 0;
+                var sampleMatches = new List<string>();
+
+                // Build regex from pattern for testing
+                var patternRegex = BuildPatternRegex(sub.MatchPattern);
+
+                foreach (var (title, channelName, episodeTitle) in allPrograms)
+                {
+                    // Combine all searchable text
+                    var searchText = $"{title} {episodeTitle} {channelName}".ToLowerInvariant();
+
+                    // Test pattern match
+                    if (patternRegex.IsMatch(searchText))
+                    {
+                        matchCount++;
+                        if (sampleMatches.Count < 5)
+                        {
+                            sampleMatches.Add($"{title} [{channelName}]");
+                        }
+                    }
+                }
+
+                matchResults.Add(new SubscriptionMatchResult
+                {
+                    SubscriptionName = sub.Name,
+                    Pattern = sub.MatchPattern,
+                    Type = sub.Type.ToString(),
+                    MatchCount = matchCount,
+                    SampleMatches = sampleMatches
+                });
+            }
+
+            response.Results = matchResults.OrderByDescending(r => r.MatchCount).ToList();
+            response.TotalMatches = matchResults.Sum(r => r.MatchCount);
+            response.HoursScanned = hours;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to test subscriptions");
+            response.Error = ex.Message;
+        }
+
+        return Ok(response);
+    }
+
+    /// <summary>
+    /// Builds a regex from a pattern (handles simple patterns and regex).
+    /// </summary>
+    private static Regex BuildPatternRegex(string pattern)
+    {
+        try
+        {
+            // If it looks like a regex pattern, use it directly
+            if (pattern.Contains("|") || pattern.Contains("(") || pattern.Contains("["))
+            {
+                return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
+            }
+            
+            // Otherwise treat as a literal search term
+            return new Regex(Regex.Escape(pattern), RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        }
+        catch
+        {
+            // If regex fails, fall back to literal
+            return new Regex(Regex.Escape(pattern), RegexOptions.IgnoreCase | RegexOptions.Compiled);
         }
     }
 
@@ -800,4 +1084,177 @@ public class AliasCheckResponse
     /// Gets or sets the canonical name for the second name.
     /// </summary>
     public string Canonical2 { get; set; } = string.Empty;
+}
+
+// ==================== EPG ANALYSIS DTOS ====================
+
+/// <summary>
+/// Request to score a single title.
+/// </summary>
+public class ScoreTitleRequest
+{
+    /// <summary>Program title to score.</summary>
+    public string Title { get; set; } = string.Empty;
+    
+    /// <summary>Optional channel name.</summary>
+    public string? Channel { get; set; }
+    
+    /// <summary>Optional description.</summary>
+    public string? Description { get; set; }
+    
+    /// <summary>Whether the program has a sports category.</summary>
+    public bool HasSportsCategory { get; set; }
+}
+
+/// <summary>
+/// Response from scoring a title.
+/// </summary>
+public class ScoreTitleResponse
+{
+    /// <summary>Original title.</summary>
+    public string Title { get; set; } = string.Empty;
+    
+    /// <summary>Confidence score.</summary>
+    public int Score { get; set; }
+    
+    /// <summary>Whether this is likely a game (score >= 50).</summary>
+    public bool IsLikelyGame { get; set; }
+    
+    /// <summary>Whether this is possibly a game (score >= 30).</summary>
+    public bool IsPossibleGame { get; set; }
+    
+    /// <summary>Cleaned title.</summary>
+    public string? CleanTitle { get; set; }
+    
+    /// <summary>Detected team 1.</summary>
+    public string? Team1 { get; set; }
+    
+    /// <summary>Detected team 2.</summary>
+    public string? Team2 { get; set; }
+    
+    /// <summary>Detected league.</summary>
+    public string? DetectedLeague { get; set; }
+    
+    /// <summary>Whether this is a replay.</summary>
+    public bool IsReplay { get; set; }
+    
+    /// <summary>Whether a matchup pattern was found.</summary>
+    public bool HasMatchupPattern { get; set; }
+    
+    /// <summary>Whether the channel is a sports channel.</summary>
+    public bool IsSportsChannel { get; set; }
+    
+    /// <summary>Whether this is pregame/postgame content.</summary>
+    public bool IsPregamePostgame { get; set; }
+}
+
+/// <summary>
+/// Response from EPG analysis.
+/// </summary>
+public class EpgAnalysisResponse
+{
+    /// <summary>Total programs scanned.</summary>
+    public int TotalPrograms { get; set; }
+    
+    /// <summary>Number of likely games found.</summary>
+    public int LikelyGamesCount { get; set; }
+    
+    /// <summary>Number of possible games found.</summary>
+    public int PossibleGamesCount { get; set; }
+    
+    /// <summary>Hours of EPG data scanned.</summary>
+    public int HoursScanned { get; set; }
+    
+    /// <summary>Minimum score threshold used.</summary>
+    public int MinScoreThreshold { get; set; }
+    
+    /// <summary>Score distribution buckets.</summary>
+    public Dictionary<string, int> ScoreDistribution { get; set; } = new();
+    
+    /// <summary>Counts by detected league.</summary>
+    public Dictionary<string, int> LeagueCounts { get; set; } = new();
+    
+    /// <summary>Top scored programs.</summary>
+    public List<ScoredProgramResult> TopScoredPrograms { get; set; } = new();
+    
+    /// <summary>Error message if any.</summary>
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// A scored program result.
+/// </summary>
+public class ScoredProgramResult
+{
+    /// <summary>Original title.</summary>
+    public string Title { get; set; } = string.Empty;
+    
+    /// <summary>Cleaned title.</summary>
+    public string? CleanTitle { get; set; }
+    
+    /// <summary>Channel name.</summary>
+    public string? Channel { get; set; }
+    
+    /// <summary>Confidence score.</summary>
+    public int Score { get; set; }
+    
+    /// <summary>Whether likely a game.</summary>
+    public bool IsLikelyGame { get; set; }
+    
+    /// <summary>Detected team 1.</summary>
+    public string? Team1 { get; set; }
+    
+    /// <summary>Detected team 2.</summary>
+    public string? Team2 { get; set; }
+    
+    /// <summary>Detected league.</summary>
+    public string? League { get; set; }
+    
+    /// <summary>Whether a replay.</summary>
+    public bool IsReplay { get; set; }
+    
+    /// <summary>Program start time.</summary>
+    public DateTime StartTime { get; set; }
+}
+
+/// <summary>
+/// Response from subscription testing.
+/// </summary>
+public class SubscriptionTestResponse
+{
+    /// <summary>Number of active subscriptions.</summary>
+    public int ActiveSubscriptions { get; set; }
+    
+    /// <summary>Total matches across all subscriptions.</summary>
+    public int TotalMatches { get; set; }
+    
+    /// <summary>Hours of EPG data scanned.</summary>
+    public int HoursScanned { get; set; }
+    
+    /// <summary>Match results by subscription.</summary>
+    public List<SubscriptionMatchResult> Results { get; set; } = new();
+    
+    /// <summary>Error message if any.</summary>
+    public string? Error { get; set; }
+}
+
+/// <summary>
+/// Result of testing a single subscription.
+/// </summary>
+public class SubscriptionMatchResult
+{
+    /// <summary>Subscription name.</summary>
+    public string SubscriptionName { get; set; } = string.Empty;
+    
+    /// <summary>Match pattern.</summary>
+    public string Pattern { get; set; } = string.Empty;
+    
+    /// <summary>Subscription type.</summary>
+    public string Type { get; set; } = string.Empty;
+    
+    /// <summary>Number of matches found.</summary>
+    public int MatchCount { get; set; }
+    
+    /// <summary>Sample matching titles.</summary>
+    public List<string> SampleMatches { get; set; } = new();
 }
