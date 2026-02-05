@@ -30,6 +30,7 @@ public class SportsController : ControllerBase
     private readonly SportsLibraryService _libraryService;
     private readonly ILiveTvManager _liveTvManager;
     private readonly SportsScorer _sportsScorer;
+    private readonly RecordingScheduler _recordingScheduler;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SportsController"/> class.
@@ -41,7 +42,8 @@ public class SportsController : ControllerBase
         PatternMatcher patternMatcher,
         SportsLibraryService libraryService,
         ILiveTvManager liveTvManager,
-        SportsScorer sportsScorer)
+        SportsScorer sportsScorer,
+        RecordingScheduler recordingScheduler)
     {
         _logger = logger;
         _subscriptionManager = subscriptionManager;
@@ -50,6 +52,7 @@ public class SportsController : ControllerBase
         _libraryService = libraryService;
         _liveTvManager = liveTvManager;
         _sportsScorer = sportsScorer;
+        _recordingScheduler = recordingScheduler;
     }
 
     // ==================== SUBSCRIPTIONS ====================
@@ -327,6 +330,78 @@ public class SportsController : ControllerBase
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Triggers an immediate EPG scan and schedules matching recordings.
+    /// </summary>
+    [HttpPost("Schedule/ScanNow")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<ScanNowResponse>> ScanNow()
+    {
+        _logger.LogInformation("Manual EPG scan triggered via API");
+        
+        try
+        {
+            // Trigger the scan
+            await _recordingScheduler.ScanEpgAsync(CancellationToken.None).ConfigureAwait(false);
+            
+            // Get updated count of scheduled recordings
+            var timers = await _liveTvManager.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false);
+            var upcomingCount = timers.Items
+                .Count(t => t.StartDate >= DateTime.UtcNow && t.StartDate < DateTime.UtcNow.AddHours(48));
+            
+            return Ok(new ScanNowResponse
+            {
+                Success = true,
+                Message = "EPG scan completed successfully",
+                MatchesFound = upcomingCount,  // Approximate - shows current upcoming count
+                RecordingsScheduled = upcomingCount
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Manual EPG scan failed");
+            return Ok(new ScanNowResponse
+            {
+                Success = false,
+                Message = $"Scan failed: {ex.Message}",
+                MatchesFound = 0,
+                RecordingsScheduled = 0
+            });
+        }
+    }
+
+    /// <summary>
+    /// Clears the plugin's internal schedule tracking cache.
+    /// Use after changing tuner or EPG source.
+    /// </summary>
+    [HttpPost("Schedule/ClearCache")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<ClearCacheResponse> ClearScheduleCache()
+    {
+        _logger.LogInformation("Schedule cache clear triggered via API");
+        
+        try
+        {
+            // Clear the internal tracking set in RecordingScheduler
+            _recordingScheduler.ClearScheduledProgramsCache();
+            
+            return Ok(new ClearCacheResponse
+            {
+                Success = true,
+                Message = "Schedule cache cleared. Run 'Scan EPG Now' to rescan."
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clear schedule cache");
+            return Ok(new ClearCacheResponse
+            {
+                Success = false,
+                Message = $"Clear failed: {ex.Message}"
+            });
+        }
     }
 
     // ==================== ALIASES ====================

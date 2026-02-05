@@ -38,6 +38,26 @@
                         </div>
                     </fieldset>
                     
+                    <!-- Quick Actions -->
+                    <fieldset class="verticalSection">
+                        <legend>⚡ Quick Actions</legend>
+                        <div style="display: flex; gap: 1em; flex-wrap: wrap;">
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.scanNow()" id="scanNowBtn">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">search</span>
+                                <span style="vertical-align: middle;">Scan EPG Now</span>
+                            </button>
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.clearScheduleCache()" id="clearCacheBtn">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_sweep</span>
+                                <span style="vertical-align: middle;">Clear Schedule Cache</span>
+                            </button>
+                        </div>
+                        <div class="fieldDescription" style="margin-top: 0.5em;">
+                            <strong>Scan EPG Now:</strong> Immediately scan the guide for matching programs and schedule recordings.<br>
+                            <strong>Clear Schedule Cache:</strong> Reset the plugin's internal tracking (use after changing tuner/EPG).
+                        </div>
+                        <div id="actionStatus" class="fieldDescription" style="margin-top: 0.5em; display: none;"></div>
+                    </fieldset>
+                    
                     <!-- Upcoming Recordings Dashboard -->
                     <fieldset class="verticalSection">
                         <legend>📺 Upcoming Recordings</legend>
@@ -895,6 +915,74 @@
                 
                 async refreshUpcoming() {
                     await this.loadUpcomingRecordings();
+                },
+                
+                async scanNow() {
+                    const btn = document.getElementById('scanNowBtn');
+                    const status = document.getElementById('actionStatus');
+                    
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">hourglass_empty</span> <span style="vertical-align: middle;">Scanning...</span>';
+                    status.style.display = 'block';
+                    status.textContent = 'Scanning EPG for matching programs...';
+                    status.style.color = '#2196f3';
+                    
+                    try {
+                        const result = await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/ScanNow'),
+                            type: 'POST',
+                            dataType: 'json'
+                        });
+                        
+                        status.style.color = '#4caf50';
+                        status.innerHTML = '✅ Scan complete! Found ' + (result.MatchesFound || 0) + ' matches, scheduled ' + (result.RecordingsScheduled || 0) + ' recordings.';
+                        
+                        // Refresh the upcoming list
+                        await this.loadUpcomingRecordings();
+                    } catch (e) {
+                        console.error('Scan failed:', e);
+                        status.style.color = '#f44336';
+                        status.textContent = '❌ Scan failed: ' + (e.message || 'Unknown error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">search</span> <span style="vertical-align: middle;">Scan EPG Now</span>';
+                    }
+                },
+                
+                async clearScheduleCache() {
+                    if (!confirm('This will clear the plugin\'s internal schedule tracking. Use this after changing your tuner or EPG source. Continue?')) {
+                        return;
+                    }
+                    
+                    const btn = document.getElementById('clearCacheBtn');
+                    const status = document.getElementById('actionStatus');
+                    
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">hourglass_empty</span> <span style="vertical-align: middle;">Clearing...</span>';
+                    status.style.display = 'block';
+                    status.textContent = 'Clearing schedule cache...';
+                    status.style.color = '#2196f3';
+                    
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/ClearCache'),
+                            type: 'POST'
+                        });
+                        
+                        status.style.color = '#4caf50';
+                        status.innerHTML = '✅ Cache cleared! The plugin will rescan the EPG on the next interval or click "Scan EPG Now".';
+                        
+                        // Reset the upcoming list
+                        document.getElementById('upcomingRecordingsList').innerHTML = '<p class="fieldDescription">Cache cleared. Click "Scan EPG Now" to find games.</p>';
+                        document.getElementById('statUpcoming').textContent = '0';
+                    } catch (e) {
+                        console.error('Clear cache failed:', e);
+                        status.style.color = '#f44336';
+                        status.textContent = '❌ Clear failed: ' + (e.message || 'Unknown error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_sweep</span> <span style="vertical-align: middle;">Clear Schedule Cache</span>';
+                    }
                 },
                 
                 async loadUpcomingRecordings() {

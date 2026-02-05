@@ -133,3 +133,45 @@ public class UpcomingRecordingsResponse
     /// </summary>
     public System.Collections.Generic.Dictionary<string, int> SummaryByDate { get; set; } = new();
 }
+
+/// <summary>
+/// Response from manual EPG scan request.
+/// </summary>
+public class ScanNowResponse
+{
+    /// <summary>
+    /// Gets or sets whether the scan succeeded.
+    /// </summary>
+    public bool Success { get; set; }
+
+    /// <summary>
+    /// Gets or sets the result message.
+    /// </summary>
+    public string Message { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Gets or sets the number of matching programs found.
+    /// </summary>
+    public int MatchesFound { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of recordings scheduled.
+    /// </summary>
+    public int RecordingsScheduled { get; set; }
+}
+
+/// <summary>
+/// Response from cache clear request.
+/// </summary>
+public class ClearCacheResponse
+{
+    /// <summary>
+    /// Gets or sets whether the clear succeeded.
+    /// </summary>
+    public bool Success { get; set; }
+
+    /// <summary>
+    /// Gets or sets the result message.
+    /// </summary>
+    public string Message { get; set; } = string.Empty;
+}

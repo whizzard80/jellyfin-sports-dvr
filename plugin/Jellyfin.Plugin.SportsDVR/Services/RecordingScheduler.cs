@@ -84,6 +84,16 @@ public class RecordingScheduler : IHostedService, IDisposable
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Clears the internal cache of scheduled program IDs.
+    /// Use this when the tuner or EPG source changes to force re-evaluation of all programs.
+    /// </summary>
+    public void ClearScheduledProgramsCache()
+    {
+        _logger.LogInformation("Clearing scheduled programs cache ({Count} entries)", _scheduledPrograms.Count);
+        _scheduledPrograms.Clear();
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
