@@ -31,7 +31,24 @@
                                 <span id="statConcurrent" style="font-size: 1.5em; font-weight: bold;">2</span>
                                 <div class="fieldDescription">Max Streams</div>
                             </div>
+                            <div>
+                                <span id="statUpcoming" style="font-size: 1.5em; font-weight: bold; color: #4caf50;">0</span>
+                                <div class="fieldDescription">Upcoming (48h)</div>
+                            </div>
                         </div>
+                    </fieldset>
+                    
+                    <!-- Upcoming Recordings Dashboard -->
+                    <fieldset class="verticalSection">
+                        <legend>📺 Upcoming Recordings</legend>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1em;">
+                            <div class="fieldDescription" id="upcomingSummary">Loading...</div>
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.refreshUpcoming()" style="padding: 0.3em 0.8em;">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">refresh</span>
+                                <span style="vertical-align: middle;">Refresh</span>
+                            </button>
+                        </div>
+                        <div id="upcomingRecordingsList" style="max-height: 400px; overflow-y: auto;"></div>
                     </fieldset>
                     
                     <!-- Settings -->
@@ -428,12 +445,16 @@
                         await this.loadSubscriptions();
                         await this.loadStatus();
                         await this.loadCustomAliases();
+                        await this.loadUpcomingRecordings();
                         
                         // Bind organize button directly
                         const organizeBtn = document.getElementById('organizeRecordings');
                         if (organizeBtn) {
                             organizeBtn.onclick = () => this.organizeRecordings();
                         }
+                        
+                        // Auto-refresh upcoming every 5 minutes
+                        setInterval(() => this.loadUpcomingRecordings(), 5 * 60 * 1000);
                     },
                 
                 async loadSettings() {
@@ -869,6 +890,100 @@
                         console.error('Organization error:', error);
                     } finally {
                         btn.disabled = false;
+                    }
+                },
+                
+                async refreshUpcoming() {
+                    await this.loadUpcomingRecordings();
+                },
+                
+                async loadUpcomingRecordings() {
+                    const container = document.getElementById('upcomingRecordingsList');
+                    const summary = document.getElementById('upcomingSummary');
+                    const statUpcoming = document.getElementById('statUpcoming');
+                    
+                    try {
+                        const data = await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/Upcoming'),
+                            type: 'GET',
+                            dataType: 'json'
+                        });
+                        
+                        // Update stat counter
+                        statUpcoming.textContent = data.TotalScheduled || 0;
+                        
+                        // Build summary line
+                        if (data.SummaryByDate && Object.keys(data.SummaryByDate).length > 0) {
+                            const summaryParts = Object.entries(data.SummaryByDate)
+                                .map(([date, count]) => date + ': ' + count)
+                                .join(' | ');
+                            summary.textContent = summaryParts;
+                        } else {
+                            summary.textContent = 'No upcoming recordings';
+                        }
+                        
+                        // Render list
+                        if (!data.Scheduled || data.Scheduled.length === 0) {
+                            container.innerHTML = '<p class="fieldDescription">No games scheduled for the next 48 hours.</p>';
+                            return;
+                        }
+                        
+                        let html = '<div class="paperList">';
+                        let currentDate = '';
+                        
+                        data.Scheduled.forEach(rec => {
+                            const startDate = new Date(rec.StartTime);
+                            const dateStr = startDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+                            const timeStr = startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                            
+                            // Add date header if new date
+                            if (dateStr !== currentDate) {
+                                currentDate = dateStr;
+                                html += '<div style="background: rgba(255,255,255,0.1); padding: 0.5em 1em; font-weight: bold; margin-top: 0.5em;">' + dateStr + '</div>';
+                            }
+                            
+                            // Determine badge color by league
+                            const leagueColors = {
+                                'NBA': '#c9082a',
+                                'NFL': '#013369',
+                                'MLB': '#002d72',
+                                'NHL': '#000000',
+                                'EPL': '#3d195b',
+                                'SerieA': '#008fd7',
+                                'LaLiga': '#ee8707',
+                                'Champions League': '#1a1a2e',
+                                'UFC': '#c9082a'
+                            };
+                            const badgeColor = leagueColors[rec.League] || 'rgba(255,255,255,0.2)';
+                            
+                            // Build title
+                            let title = rec.CleanTitle || rec.Title || 'Unknown';
+                            if (rec.Team1 && rec.Team2 && !title.includes('vs')) {
+                                title = rec.Team1 + ' vs ' + rec.Team2;
+                            }
+                            
+                            html += '<div class="listItem listItem-border">' +
+                                '<div style="width: 60px; text-align: center; color: #888; font-size: 0.9em;">' + timeStr + '</div>' +
+                                '<div class="listItemBody two-line" style="flex: 1;">' +
+                                '<div class="listItemBodyText">' + this.escapeHtml(title) + '</div>' +
+                                '<div class="listItemBodyText secondary">' +
+                                '<span style="background: ' + badgeColor + '; padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-right: 0.5em;">' + this.escapeHtml(rec.League || 'Sports') + '</span>' +
+                                this.escapeHtml(rec.ChannelName) +
+                                (rec.SubscriptionName ? ' · ' + this.escapeHtml(rec.SubscriptionName) : '') +
+                                (rec.HasBackupChannels ? ' <span style="color: #4caf50;" title="Backup channels available">●</span>' : '') +
+                                '</div>' +
+                                '</div>' +
+                                '</div>';
+                        });
+                        
+                        html += '</div>';
+                        container.innerHTML = html;
+                        
+                    } catch (e) {
+                        console.error('Failed to load upcoming recordings:', e);
+                        summary.textContent = 'Failed to load';
+                        container.innerHTML = '<p class="fieldDescription" style="color: #f44336;">Failed to load upcoming recordings. Make sure the plugin is installed and Live TV is configured.</p>';
+                        statUpcoming.textContent = '?';
                     }
                 }
                 };

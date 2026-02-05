@@ -181,11 +181,17 @@ public class RecordingScheduler : IHostedService, IDisposable
                     continue;
                 }
 
-                // Score the program
+                // Score the program - include EpisodeTitle in description for raw EPG
+                // where matchup info is often in EpisodeTitle (e.g., "BYU at Oklahoma State")
+                var descWithEpisode = string.Join(" ", new[] { 
+                    program.EpisodeTitle, 
+                    program.Overview 
+                }.Where(s => !string.IsNullOrEmpty(s)));
+                
                 var scored = _sportsScorer.Score(
                     program.Name ?? string.Empty,
                     program.ChannelName,
-                    program.Overview,
+                    descWithEpisode,
                     program.IsSports);
 
                 // Must be a likely sports event
@@ -312,7 +318,8 @@ public class RecordingScheduler : IHostedService, IDisposable
                             IsLive = program.IsLive ?? false,
                             IsNew = program.IsNews ?? false,
                             IsPremiere = program.IsPremiere ?? false,
-                            IsRepeat = program.IsRepeat ?? false
+                            IsRepeat = program.IsRepeat ?? false,
+                            EpisodeTitle = program.EpisodeTitle  // Teamarr stores league info here (e.g., "NBA")
                         });
                     }
                 }
@@ -353,7 +360,11 @@ public class RecordingScheduler : IHostedService, IDisposable
     {
         var title = program.Name?.ToLowerInvariant() ?? string.Empty;
         var description = program.Overview?.ToLowerInvariant() ?? string.Empty;
-        var combinedText = $"{title} {description}";
+        var episodeTitle = program.EpisodeTitle?.ToLowerInvariant() ?? string.Empty;  // Teamarr league info
+        var channelName = program.ChannelName?.ToLowerInvariant() ?? string.Empty;  // Teamarr matchup as channel name
+        
+        // Include episode title and channel name for teamarr events which store league/matchup info there
+        var combinedText = $"{title} {description} {episodeTitle} {channelName}";
 
         foreach (var sub in subscriptions.OrderByDescending(s => s.Priority))
         {
@@ -404,6 +415,40 @@ public class RecordingScheduler : IHostedService, IDisposable
                         // Use word boundary matching for leagues to avoid partial matches
                         // e.g., "premier league" shouldn't match "Afghanistan Premier League"
                         isMatch = MatchesWithWordBoundary(combinedText, pattern);
+                        
+                        // Try common league aliases (e.g., "ncaa" = "college")
+                        if (!isMatch)
+                        {
+                            var expandedPatterns = GetLeaguePatternAliases(pattern);
+                            foreach (var alias in expandedPatterns)
+                            {
+                                if (MatchesWithWordBoundary(combinedText, alias))
+                                {
+                                    isMatch = true;
+                                    _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via alias '{Alias}'",
+                                        program.Name, sub.Name, alias);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Also check for teamarr-style EpisodeTitle which has just the league abbreviation (e.g., "NBA")
+                        // If pattern is "nba basketball", also try just "nba" against episodeTitle
+                        if (!isMatch && !string.IsNullOrEmpty(episodeTitle))
+                        {
+                            // Get primary keyword from pattern (e.g., "nba" from "nba basketball")
+                            var patternWords = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                            foreach (var word in patternWords)
+                            {
+                                if (word.Length >= 3 && MatchesWithWordBoundary(episodeTitle, word))
+                                {
+                                    isMatch = true;
+                                    _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via EpisodeTitle '{Episode}'",
+                                        program.Name, sub.Name, program.EpisodeTitle);
+                                    break;
+                                }
+                            }
+                        }
                     }
                     break;
 
@@ -493,16 +538,18 @@ public class RecordingScheduler : IHostedService, IDisposable
             return true;
         }
 
-        var titleLower = title.ToLower();
+        // Include EpisodeTitle for sport type detection (teamarr stores league info there)
+        var titleWithEpisode = $"{title} {program.EpisodeTitle}";
+        var titleLower = titleWithEpisode.ToLower();
 
         // Explicit LIVE indicators in title
-        if (LiveIndicatorPattern.IsMatch(title))
+        if (LiveIndicatorPattern.IsMatch(titleWithEpisode))
         {
             return true;
         }
 
         // Main Card / Prelims for events
-        if (Regex.IsMatch(title, @":\s*(main\s*card|prelims?)\s*$", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(titleWithEpisode, @":\s*(main\s*card|prelims?)\s*$", RegexOptions.IgnoreCase))
         {
             return true;
         }
@@ -540,10 +587,10 @@ public class RecordingScheduler : IHostedService, IDisposable
         }
         
         // Season format "XX/YY:" (e.g., "NBA 25/26:", "Serie A 25/26:") without LIVE = scheduled rebroadcast
-        if (Regex.IsMatch(title, @"\b\d{2}/\d{2}\s*:"))
+        if (Regex.IsMatch(titleWithEpisode, @"\b\d{2}/\d{2}\s*:"))
         {
             // Only allow if it also has LIVE somewhere
-            if (!LiveIndicatorPattern.IsMatch(title))
+            if (!LiveIndicatorPattern.IsMatch(titleWithEpisode))
             {
                 return false;
             }
@@ -559,7 +606,7 @@ public class RecordingScheduler : IHostedService, IDisposable
 
         // For sports games with vs/v/@/at pattern
         // Use time-based heuristics to determine if likely live
-        if (Regex.IsMatch(title, @"\s+(vs\.?|v\.?|@|at)\s+", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(titleWithEpisode, @"\s+(vs\.?|v\.?|@|at)\s+", RegexOptions.IgnoreCase))
         {
             // If explicitly marked live, always accept
             if (program.IsLive)
@@ -568,18 +615,22 @@ public class RecordingScheduler : IHostedService, IDisposable
             }
             
             // Use time-based heuristics for game broadcasts
-            return IsLikelyLiveGameTime(title, program.StartDate);
+            // Pass full context including EpisodeTitle for sport type detection
+            return IsLikelyLiveGameTime(titleWithEpisode, program.StartDate);
         }
         
         // "Team at Team" format without prefix - likely current game
-        if (Regex.IsMatch(title, @"^[A-Z][a-zA-Z\s]+ at [A-Z][a-zA-Z\s]+$"))
+        // Use titleWithEpisode to catch teamarr-style team names
+        if (Regex.IsMatch(titleWithEpisode, @"^[A-Z][a-zA-Z\s\(\)\-0-9]+ at [A-Z][a-zA-Z\s\(\)\-0-9]+"))
         {
             return true;
         }
 
         // Generic titles without clear indicators - exclude
         // "Premier League", "NBA Basketball", etc. alone are not specific enough
-        if (Regex.IsMatch(title, @"^(premier league|nba|nfl|nhl|mlb|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football)?$", RegexOptions.IgnoreCase))
+        // But don't exclude if it's a teamarr event with specific matchup info
+        var baseTitle = title.ToLower();  // Just the original title for this check
+        if (Regex.IsMatch(baseTitle, @"^(premier league|nba|nfl|nhl|mlb|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football)?$", RegexOptions.IgnoreCase))
         {
             return false;
         }
@@ -785,6 +836,82 @@ public class RecordingScheduler : IHostedService, IDisposable
             return text.Contains(pattern, StringComparison.OrdinalIgnoreCase);
         }
     }
+    
+    /// <summary>
+    /// Get common aliases for league patterns to handle variations in EPG data.
+    /// e.g., "ncaa basketball" should also match "college basketball"
+    /// </summary>
+    private static IEnumerable<string> GetLeaguePatternAliases(string pattern)
+    {
+        var aliases = new List<string> { pattern };
+        var patternLower = pattern.ToLowerInvariant();
+        
+        // NCAA / College equivalence
+        if (patternLower.Contains("ncaa"))
+        {
+            aliases.Add(patternLower.Replace("ncaa", "college"));
+        }
+        else if (patternLower.Contains("college"))
+        {
+            aliases.Add(patternLower.Replace("college", "ncaa"));
+        }
+        
+        // NBA equivalence
+        if (patternLower == "nba basketball" || patternLower == "nba")
+        {
+            aliases.Add("nba");
+            aliases.Add("nba basketball");
+        }
+        
+        // NFL equivalence
+        if (patternLower == "nfl football" || patternLower == "nfl")
+        {
+            aliases.Add("nfl");
+            aliases.Add("nfl football");
+        }
+        
+        // NHL equivalence
+        if (patternLower == "nhl hockey" || patternLower == "nhl")
+        {
+            aliases.Add("nhl");
+            aliases.Add("nhl hockey");
+        }
+        
+        // MLB equivalence
+        if (patternLower == "mlb baseball" || patternLower == "mlb")
+        {
+            aliases.Add("mlb");
+            aliases.Add("mlb baseball");
+        }
+        
+        // Premier League / EPL equivalence
+        if (patternLower.Contains("premier league"))
+        {
+            aliases.Add("epl");
+            aliases.Add("english premier league");
+        }
+        else if (patternLower == "epl")
+        {
+            aliases.Add("premier league");
+            aliases.Add("english premier league");
+        }
+        
+        // Serie A variants
+        if (patternLower.Contains("serie a"))
+        {
+            aliases.Add("italian serie a");
+            aliases.Add("serie a soccer");
+        }
+        
+        // March Madness / NCAA Tournament
+        if (patternLower.Contains("march madness"))
+        {
+            aliases.Add("ncaa tournament");
+            aliases.Add("college basketball");
+        }
+        
+        return aliases.Distinct();
+    }
 }
 
 /// <summary>
@@ -836,4 +963,7 @@ public class ProgramInfo
     
     /// <summary>Gets or sets whether this is a repeat.</summary>
     public bool IsRepeat { get; set; }
+    
+    /// <summary>Gets or sets the episode title (often contains league info from teamarr).</summary>
+    public string? EpisodeTitle { get; set; }
 }

@@ -142,17 +142,23 @@ public class SportsScorer
     // League detection keywords
     private static readonly Dictionary<string, string[]> LeagueKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["NBA"] = new[] { "nba" },
-        ["NFL"] = new[] { "nfl" },
-        ["NHL"] = new[] { "nhl" },
-        ["MLB"] = new[] { "mlb" },
-        ["EPL"] = new[] { "epl", "premier league" },
-        ["LaLiga"] = new[] { "la liga" },
-        ["Bundesliga"] = new[] { "bundesliga" },
-        ["SerieA"] = new[] { "serie a" },
-        ["Champions League"] = new[] { "champions league", "ucl" },
+        ["NBA"] = new[] { "nba", "nba basketball" },
+        ["NFL"] = new[] { "nfl", "nfl football" },
+        ["NHL"] = new[] { "nhl", "nhl hockey" },
+        ["MLB"] = new[] { "mlb", "mlb baseball" },
+        ["NCAA"] = new[] { "ncaa", "college basketball", "college football", "college hockey", "march madness" },
+        ["EPL"] = new[] { "epl", "premier league", "english premier league" },
+        ["LaLiga"] = new[] { "la liga", "spanish la liga" },
+        ["Bundesliga"] = new[] { "bundesliga", "german bundesliga" },
+        ["SerieA"] = new[] { "serie a", "italian serie a" },
+        ["Champions League"] = new[] { "champions league", "ucl", "uefa champions league" },
+        ["Europa League"] = new[] { "europa league", "uefa europa league" },
+        ["MLS"] = new[] { "mls", "major league soccer" },
         ["UFC"] = new[] { "ufc" },
-        ["F1"] = new[] { "formula 1", "f1" }
+        ["Boxing"] = new[] { "boxing", "wbc", "wba", "ibf", "wbo" },
+        ["F1"] = new[] { "formula 1", "f1" },
+        ["WWE"] = new[] { "wwe", "raw", "smackdown" },
+        ["Golf"] = new[] { "pga", "lpga", "liv golf" }
     };
 
     public SportsScorer(ILogger<SportsScorer> logger)
@@ -163,22 +169,38 @@ public class SportsScorer
     /// <summary>
     /// Scores a program to determine likelihood of being a sports game.
     /// </summary>
+    /// <param name="title">Program title</param>
+    /// <param name="channel">Channel name</param>
+    /// <param name="description">Program description/overview - may include EpisodeTitle for matchup info</param>
+    /// <param name="hasSportsCategory">Whether the program is categorized as sports</param>
     public ScoredProgram Score(string title, string? channel = null, string? description = null, bool hasSportsCategory = false)
     {
         var result = new ScoredProgram { OriginalTitle = title, Channel = channel };
         int score = 0;
         var titleLower = title.ToLowerInvariant();
         var channelLower = channel?.ToLowerInvariant() ?? "";
+        var descLower = description?.ToLowerInvariant() ?? "";
+        
+        // Combined text for searching (title + description covers raw EPG where matchup is in description)
+        var combinedText = $"{titleLower} {descLower}";
 
         // Clean league prefix before team extraction
         var cleanedTitle = LeaguePrefixPattern.Replace(title, "").Trim();
+        var cleanedDesc = LeaguePrefixPattern.Replace(description ?? "", "").Trim();
 
-        // Check matchup patterns (strongest signals)
+        // Check matchup patterns in BOTH title AND description (strongest signals)
+        // For raw EPG, matchup might be in description like "BYU at Oklahoma State"
         if (VsPattern.IsMatch(title))
         {
             score += SCORE_VS_PATTERN;
             result.HasMatchupPattern = true;
             ExtractTeams(TeamExtractVs, cleanedTitle, result);
+        }
+        else if (VsPattern.IsMatch(description ?? ""))
+        {
+            score += SCORE_VS_PATTERN - 5;  // Slightly lower if in description
+            result.HasMatchupPattern = true;
+            ExtractTeams(TeamExtractVs, cleanedDesc, result);
         }
         else if (AtSymbolPattern.IsMatch(title) || AtWordPattern.IsMatch(title))
         {
@@ -186,17 +208,23 @@ public class SportsScorer
             result.HasMatchupPattern = true;
             ExtractTeams(TeamExtractAt, cleanedTitle, result);
         }
-        else if (VPattern.IsMatch(title))
+        else if (AtSymbolPattern.IsMatch(description ?? "") || AtWordPattern.IsMatch(description ?? ""))
+        {
+            score += SCORE_AT_PATTERN - 5;  // Matchup in description
+            result.HasMatchupPattern = true;
+            ExtractTeams(TeamExtractAt, cleanedDesc, result);
+        }
+        else if (VPattern.IsMatch(title) || VPattern.IsMatch(description ?? ""))
         {
             score += SCORE_V_PATTERN;
             result.HasMatchupPattern = true;
         }
 
-        // Check for known teams
-        var (league1, team1) = FindTeam(titleLower);
+        // Check for known teams in combined text (title + description)
+        var (league1, team1) = FindTeam(combinedText);
         if (team1 != null)
         {
-            var remaining = titleLower.Replace(team1.ToLower(), "");
+            var remaining = combinedText.Replace(team1.ToLower(), "");
             var (league2, team2) = FindTeam(remaining);
 
             if (team2 != null && league1 == league2)
@@ -233,12 +261,12 @@ public class SportsScorer
             score += SCORE_SPORTS_CATEGORY;
         }
 
-        // Check league in title
+        // Check league in title OR description (combined text)
         if (result.DetectedLeague == null)
         {
             foreach (var (league, keywords) in LeagueKeywords)
             {
-                if (keywords.Any(k => titleLower.Contains(k)))
+                if (keywords.Any(k => combinedText.Contains(k)))
                 {
                     result.DetectedLeague = league;
                     score += SCORE_LEAGUE_IN_TITLE;

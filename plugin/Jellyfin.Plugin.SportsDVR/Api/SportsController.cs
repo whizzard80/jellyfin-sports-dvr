@@ -2,9 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Plugin.SportsDVR.Models;
 using Jellyfin.Plugin.SportsDVR.Services;
+using MediaBrowser.Controller.LiveTv;
+using MediaBrowser.Model.LiveTv;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -25,6 +28,8 @@ public class SportsController : ControllerBase
     private readonly EpgParser _epgParser;
     private readonly PatternMatcher _patternMatcher;
     private readonly SportsLibraryService _libraryService;
+    private readonly ILiveTvManager _liveTvManager;
+    private readonly SportsScorer _sportsScorer;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SportsController"/> class.
@@ -34,13 +39,17 @@ public class SportsController : ControllerBase
         SubscriptionManager subscriptionManager,
         EpgParser epgParser,
         PatternMatcher patternMatcher,
-        SportsLibraryService libraryService)
+        SportsLibraryService libraryService,
+        ILiveTvManager liveTvManager,
+        SportsScorer sportsScorer)
     {
         _logger = logger;
         _subscriptionManager = subscriptionManager;
         _epgParser = epgParser;
         _patternMatcher = patternMatcher;
         _libraryService = libraryService;
+        _liveTvManager = liveTvManager;
+        _sportsScorer = sportsScorer;
     }
 
     // ==================== SUBSCRIPTIONS ====================
@@ -205,6 +214,119 @@ public class SportsController : ControllerBase
             AutoSchedulingEnabled = config?.EnableAutoScheduling ?? true,
             ScanIntervalMinutes = config?.ScanIntervalMinutes ?? 5
         });
+    }
+
+    // ==================== SCHEDULE ====================
+
+    /// <summary>
+    /// Gets upcoming scheduled recordings for the next 48 hours.
+    /// </summary>
+    [HttpGet("Schedule/Upcoming")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<UpcomingRecordingsResponse>> GetUpcomingRecordings()
+    {
+        var response = new UpcomingRecordingsResponse();
+        var config = Plugin.Instance?.Configuration;
+        response.MaxConcurrent = config?.MaxConcurrentRecordings ?? 2;
+
+        try
+        {
+            // Get all scheduled timers from Jellyfin's DVR
+            var timers = await _liveTvManager.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false);
+            
+            var now = DateTime.UtcNow;
+            var cutoff = now.AddHours(48);
+            var today = now.Date;
+            var tomorrow = today.AddDays(1);
+
+            // Filter to upcoming timers within 48 hours
+            var upcomingTimers = timers.Items
+                .Where(t => t.StartDate >= now && t.StartDate < cutoff)
+                .OrderBy(t => t.StartDate)
+                .ToList();
+
+            foreach (var timer in upcomingTimers)
+            {
+                // Score the program to extract team/league info
+                var scored = _sportsScorer.Score(timer.Name ?? "", timer.ChannelName ?? "", timer.Overview ?? "");
+
+                var dto = new UpcomingRecordingDto
+                {
+                    ProgramId = timer.ProgramId ?? timer.Id ?? "",
+                    Title = timer.Name ?? "Unknown",
+                    CleanTitle = scored.CleanTitle ?? timer.Name ?? "Unknown",
+                    Team1 = scored.Team1,
+                    Team2 = scored.Team2,
+                    League = scored.DetectedLeague,
+                    ChannelName = timer.ChannelName ?? "Unknown",
+                    StartTime = timer.StartDate,
+                    EndTime = timer.EndDate,
+                    Priority = timer.Priority,
+                    HasBackupChannels = false, // Could be enhanced to track this
+                    IsSkipped = false
+                };
+
+                // Try to find matching subscription
+                var subscription = FindMatchingSubscriptionForTitle(timer.Name ?? "");
+                if (subscription != null)
+                {
+                    dto.SubscriptionName = subscription.Name;
+                    dto.SubscriptionType = subscription.Type.ToString();
+                }
+                else
+                {
+                    dto.SubscriptionName = scored.DetectedLeague ?? "Manual";
+                    dto.SubscriptionType = "Unknown";
+                }
+
+                response.Scheduled.Add(dto);
+
+                // Count by date
+                var dateKey = timer.StartDate.Date == today ? "Today" :
+                              timer.StartDate.Date == tomorrow ? "Tomorrow" :
+                              timer.StartDate.ToString("ddd, MMM d");
+                
+                if (!response.SummaryByDate.ContainsKey(dateKey))
+                {
+                    response.SummaryByDate[dateKey] = 0;
+                }
+                response.SummaryByDate[dateKey]++;
+            }
+
+            response.TotalScheduled = response.Scheduled.Count;
+            
+            // Calculate next scan time
+            var scanInterval = config?.ScanIntervalMinutes ?? 5;
+            response.NextScanTime = now.AddMinutes(scanInterval);
+
+            _logger.LogInformation("Returning {Count} upcoming recordings", response.TotalScheduled);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting upcoming recordings");
+        }
+
+        return Ok(response);
+    }
+
+    /// <summary>
+    /// Finds a matching subscription for a given title.
+    /// </summary>
+    private Subscription? FindMatchingSubscriptionForTitle(string title)
+    {
+        var subscriptions = _subscriptionManager.GetAll().Where(s => s.Enabled).ToList();
+        var titleLower = title.ToLowerInvariant();
+
+        foreach (var sub in subscriptions.OrderByDescending(s => s.Priority))
+        {
+            var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
+            if (titleLower.Contains(pattern))
+            {
+                return sub;
+            }
+        }
+
+        return null;
     }
 
     // ==================== ALIASES ====================
