@@ -2,6 +2,7 @@ using Jellyfin.Plugin.SportsDVR.Services;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Jellyfin.Plugin.SportsDVR;
 
@@ -22,7 +23,10 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<SmartScheduler>();
         services.AddSingleton<SportsLibraryService>();
 
-        // Background service for EPG scanning and Jellyfin DVR integration
-        services.AddHostedService<RecordingScheduler>();
+        // Register RecordingScheduler as singleton so it can be injected
+        services.AddSingleton<RecordingScheduler>();
+        
+        // Also register it as a hosted service (using the same singleton instance)
+        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<RecordingScheduler>());
     }
 }
