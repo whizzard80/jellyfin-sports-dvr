@@ -1,8 +1,8 @@
 using Jellyfin.Plugin.SportsDVR.Services;
+using Jellyfin.Plugin.SportsDVR.Tasks;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
 
 namespace Jellyfin.Plugin.SportsDVR;
 
@@ -21,12 +21,11 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<AliasService>();
         services.AddSingleton<SubscriptionManager>();
         services.AddSingleton<SmartScheduler>();
-        services.AddSingleton<SportsLibraryService>();
 
-        // Register RecordingScheduler as singleton so it can be injected
+        // Recording scheduler (singleton, called by the scheduled task)
         services.AddSingleton<RecordingScheduler>();
-        
-        // Also register it as a hosted service (using the same singleton instance)
-        services.AddSingleton<IHostedService>(sp => sp.GetRequiredService<RecordingScheduler>());
+
+        // Jellyfin scheduled task - appears in Dashboard → Scheduled Tasks
+        services.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, EpgScanTask>();
     }
 }

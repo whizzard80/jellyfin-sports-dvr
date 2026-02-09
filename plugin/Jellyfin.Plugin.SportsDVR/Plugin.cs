@@ -46,14 +46,8 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
         {
             new PluginPageInfo
             {
-                Name = Name,
+                Name = "SportsDVR",
                 EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.configPage.html"
-            },
-            new PluginPageInfo
-            {
-                Name = "Sports Library",
-                EmbeddedResourcePath = $"{GetType().Namespace}.Configuration.libraryPage.html",
-                MenuSection = "library"
             }
         };
     }

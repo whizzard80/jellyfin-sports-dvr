@@ -12,7 +12,6 @@ using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Model.LiveTv;
 using MediaBrowser.Model.Querying;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.SportsDVR.Services;
@@ -22,7 +21,7 @@ namespace Jellyfin.Plugin.SportsDVR.Services;
 /// This decides WHAT to record; Jellyfin's DVR handles the actual recording.
 /// Uses SmartScheduler for optimized scheduling with connection limits.
 /// </summary>
-public class RecordingScheduler : IHostedService, IDisposable
+public class RecordingScheduler
 {
     private readonly ILogger<RecordingScheduler> _logger;
     private readonly ILiveTvManager _liveTvManager;
@@ -31,9 +30,7 @@ public class RecordingScheduler : IHostedService, IDisposable
     private readonly SubscriptionManager _subscriptionManager;
     private readonly SmartScheduler _smartScheduler;
     
-    private Timer? _scanTimer;
     private readonly HashSet<string> _scheduledPrograms = new();
-    private bool _disposed;
 
     // Default lookahead is 3 days
     private const int DEFAULT_LOOKAHEAD_DAYS = 3;
@@ -58,32 +55,6 @@ public class RecordingScheduler : IHostedService, IDisposable
         _smartScheduler = smartScheduler;
     }
 
-    /// <inheritdoc />
-    public Task StartAsync(CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("Sports DVR Recording Scheduler starting");
-
-        var config = Plugin.Instance?.Configuration;
-        var intervalMinutes = config?.ScanIntervalMinutes ?? 5;
-
-        // Start timer to periodically scan EPG
-        _scanTimer = new Timer(
-            DoScan,
-            null,
-            TimeSpan.FromSeconds(30), // Initial delay to let Jellyfin fully start
-            TimeSpan.FromMinutes(intervalMinutes));
-
-        return Task.CompletedTask;
-    }
-
-    /// <inheritdoc />
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        _logger.LogInformation("Sports DVR Recording Scheduler stopping");
-        _scanTimer?.Change(Timeout.Infinite, 0);
-        return Task.CompletedTask;
-    }
-
     /// <summary>
     /// Clears the internal cache of scheduled program IDs.
     /// Use this when the tuner or EPG source changes to force re-evaluation of all programs.
@@ -94,60 +65,39 @@ public class RecordingScheduler : IHostedService, IDisposable
         _scheduledPrograms.Clear();
     }
 
-    /// <inheritdoc />
-    public void Dispose()
-    {
-        Dispose(true);
-        GC.SuppressFinalize(this);
-    }
-
     /// <summary>
-    /// Disposes resources.
+    /// Results from an EPG scan.
     /// </summary>
-    protected virtual void Dispose(bool disposing)
+    public class ScanResult
     {
-        if (_disposed)
-        {
-            return;
-        }
+        /// <summary>Gets or sets the number of programs matching subscriptions.</summary>
+        public int MatchesFound { get; set; }
 
-        if (disposing)
-        {
-            _scanTimer?.Dispose();
-        }
+        /// <summary>Gets or sets the number of new recordings scheduled.</summary>
+        public int NewRecordings { get; set; }
 
-        _disposed = true;
-    }
-
-    private async void DoScan(object? state)
-    {
-        try
-        {
-            await ScanEpgAsync(CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error during EPG scan");
-        }
+        /// <summary>Gets or sets the number of recordings that already existed.</summary>
+        public int AlreadyScheduled { get; set; }
     }
 
     /// <summary>
     /// Scans the EPG for programs matching subscriptions and creates an optimized schedule.
     /// </summary>
-    public async Task ScanEpgAsync(CancellationToken cancellationToken)
+    public async Task<ScanResult> ScanEpgAsync(CancellationToken cancellationToken)
     {
+        var result = new ScanResult();
         var config = Plugin.Instance?.Configuration;
         if (config == null || !config.EnableAutoScheduling)
         {
             _logger.LogDebug("Auto-scheduling disabled, skipping scan");
-            return;
+            return result;
         }
 
         var subscriptions = _subscriptionManager.GetEnabled();
         if (subscriptions.Count == 0)
         {
             _logger.LogDebug("No enabled subscriptions, skipping scan");
-            return;
+            return result;
         }
 
         var maxConcurrent = config.MaxConcurrentRecordings > 0 
@@ -168,7 +118,7 @@ public class RecordingScheduler : IHostedService, IDisposable
 
             if (programs.Count == 0)
             {
-                return;
+                return result;
             }
 
             // Step 2: Get existing timers to avoid duplicates
@@ -180,16 +130,11 @@ public class RecordingScheduler : IHostedService, IDisposable
 
             // Step 3: Find all matching programs
             var matches = new List<MatchedProgram>();
+            var alreadyScheduledCount = 0;
 
             foreach (var program in programs)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                // Skip if already scheduled
-                if (existingProgramIds.Contains(program.Id) || _scheduledPrograms.Contains(program.Id))
-                {
-                    continue;
-                }
 
                 // Score the program - include EpisodeTitle in description for raw EPG
                 // where matchup info is often in EpisodeTitle (e.g., "BYU at Oklahoma State")
@@ -224,6 +169,13 @@ public class RecordingScheduler : IHostedService, IDisposable
                     continue;
                 }
 
+                // Skip if already scheduled (but still count them)
+                if (existingProgramIds.Contains(program.Id) || _scheduledPrograms.Contains(program.Id))
+                {
+                    alreadyScheduledCount++;
+                    continue;
+                }
+
                 matches.Add(new MatchedProgram
                 {
                     Program = program,
@@ -232,11 +184,16 @@ public class RecordingScheduler : IHostedService, IDisposable
                 });
             }
 
-            _logger.LogInformation("Found {Count} programs matching subscriptions", matches.Count);
+            var totalMatches = matches.Count + alreadyScheduledCount;
+            _logger.LogInformation(
+                "Found {Total} programs matching subscriptions ({New} new, {Existing} already scheduled)",
+                totalMatches, matches.Count, alreadyScheduledCount);
 
             if (matches.Count == 0)
             {
-                return;
+                result.MatchesFound = totalMatches;
+                result.AlreadyScheduled = alreadyScheduledCount;
+                return result;
             }
 
             // Step 4: Use SmartScheduler to create optimized schedule
@@ -244,6 +201,7 @@ public class RecordingScheduler : IHostedService, IDisposable
 
             // Step 5: Create timers for scheduled recordings
             var scheduledCount = 0;
+            var alreadyExisted = 0;
             foreach (var recording in schedule)
             {
                 try
@@ -261,21 +219,37 @@ public class RecordingScheduler : IHostedService, IDisposable
                         recording.Priority,
                         backupInfo);
                 }
+                catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Timer already exists in Jellyfin - this is fine, just track it
+                    alreadyExisted++;
+                    _scheduledPrograms.Add(recording.Program.Id);
+                    _logger.LogDebug(
+                        "Timer already exists for '{Title}' - skipping (already scheduled)",
+                        recording.Title);
+                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to schedule recording for '{Title}'", recording.Title);
                 }
             }
 
+            result.MatchesFound = totalMatches;
+            result.NewRecordings = scheduledCount;
+            result.AlreadyScheduled = alreadyScheduledCount + alreadyExisted;
+
             _logger.LogInformation(
-                "📺 EPG scan complete: {Matches} matches → {Scheduled} recordings scheduled",
+                "📺 EPG scan complete: {Matches} matches → {Scheduled} new recordings, {Existed} already scheduled",
                 matches.Count,
-                scheduledCount);
+                scheduledCount,
+                alreadyExisted);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error during EPG scan");
         }
+
+        return result;
     }
 
     private async Task<List<ProgramInfo>> GetUpcomingProgramsAsync(CancellationToken cancellationToken)

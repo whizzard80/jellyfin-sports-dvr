@@ -31,7 +31,6 @@ public class SportsController : ControllerBase
     private readonly SubscriptionManager _subscriptionManager;
     private readonly EpgParser _epgParser;
     private readonly PatternMatcher _patternMatcher;
-    private readonly SportsLibraryService _libraryService;
     private readonly ILiveTvManager _liveTvManager;
     private readonly SportsScorer _sportsScorer;
     private readonly RecordingScheduler _recordingScheduler;
@@ -44,7 +43,6 @@ public class SportsController : ControllerBase
         SubscriptionManager subscriptionManager,
         EpgParser epgParser,
         PatternMatcher patternMatcher,
-        SportsLibraryService libraryService,
         ILiveTvManager liveTvManager,
         SportsScorer sportsScorer,
         RecordingScheduler recordingScheduler)
@@ -53,7 +51,6 @@ public class SportsController : ControllerBase
         _subscriptionManager = subscriptionManager;
         _epgParser = epgParser;
         _patternMatcher = patternMatcher;
-        _libraryService = libraryService;
         _liveTvManager = liveTvManager;
         _sportsScorer = sportsScorer;
         _recordingScheduler = recordingScheduler;
@@ -226,7 +223,7 @@ public class SportsController : ControllerBase
     // ==================== SCHEDULE ====================
 
     /// <summary>
-    /// Gets upcoming scheduled recordings for the next 48 hours.
+    /// Gets all upcoming scheduled recordings (currently airing + future).
     /// </summary>
     [HttpGet("Schedule/Upcoming")]
     [ProducesResponseType(StatusCodes.Status200OK)]
@@ -242,15 +239,18 @@ public class SportsController : ControllerBase
             var timers = await _liveTvManager.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false);
             
             var now = DateTime.UtcNow;
-            var cutoff = now.AddHours(48);
+            var cutoff48h = now.AddHours(48);
             var today = now.Date;
             var tomorrow = today.AddDays(1);
 
-            // Filter to upcoming timers within 48 hours
+            // Show ALL upcoming timers (not ended yet), sorted by start time.
+            // This includes currently-airing games and all future scheduled recordings.
             var upcomingTimers = timers.Items
-                .Where(t => t.StartDate >= now && t.StartDate < cutoff)
+                .Where(t => t.EndDate >= now)
                 .OrderBy(t => t.StartDate)
                 .ToList();
+
+            var count48h = 0;
 
             foreach (var timer in upcomingTimers)
             {
@@ -288,7 +288,13 @@ public class SportsController : ControllerBase
 
                 response.Scheduled.Add(dto);
 
-                // Count by date
+                // Track 48h count separately
+                if (timer.StartDate < cutoff48h)
+                {
+                    count48h++;
+                }
+
+                // Count by date for summary
                 var dateKey = timer.StartDate.Date == today ? "Today" :
                               timer.StartDate.Date == tomorrow ? "Tomorrow" :
                               timer.StartDate.ToString("ddd, MMM d");
@@ -301,12 +307,13 @@ public class SportsController : ControllerBase
             }
 
             response.TotalScheduled = response.Scheduled.Count;
+            response.Upcoming48h = count48h;
             
             // Calculate next scan time
             var scanInterval = config?.ScanIntervalMinutes ?? 5;
             response.NextScanTime = now.AddMinutes(scanInterval);
 
-            _logger.LogInformation("Returning {Count} upcoming recordings", response.TotalScheduled);
+            _logger.LogInformation("Returning {Count} upcoming recordings ({Count48h} in next 48h)", response.TotalScheduled, count48h);
         }
         catch (Exception ex)
         {
@@ -347,20 +354,24 @@ public class SportsController : ControllerBase
         
         try
         {
-            // Trigger the scan
-            await _recordingScheduler.ScanEpgAsync(CancellationToken.None).ConfigureAwait(false);
+            // Trigger the scan and get actual results
+            var scanResult = await _recordingScheduler.ScanEpgAsync(CancellationToken.None).ConfigureAwait(false);
             
-            // Get updated count of scheduled recordings
+            // Get total upcoming count from Jellyfin timers (including non-sports)
             var timers = await _liveTvManager.GetTimers(new TimerQuery(), CancellationToken.None).ConfigureAwait(false);
-            var upcomingCount = timers.Items
-                .Count(t => t.StartDate >= DateTime.UtcNow && t.StartDate < DateTime.UtcNow.AddHours(48));
+            var now = DateTime.UtcNow;
+            var cutoff = now.AddHours(48);
+            var totalUpcoming = timers.Items
+                .Count(t => t.EndDate >= now && t.StartDate < cutoff);
             
             return Ok(new ScanNowResponse
             {
                 Success = true,
                 Message = "EPG scan completed successfully",
-                MatchesFound = upcomingCount,  // Approximate - shows current upcoming count
-                RecordingsScheduled = upcomingCount
+                MatchesFound = scanResult.MatchesFound,
+                NewRecordings = scanResult.NewRecordings,
+                AlreadyScheduled = scanResult.AlreadyScheduled,
+                TotalUpcoming = totalUpcoming
             });
         }
         catch (Exception ex)
@@ -371,7 +382,9 @@ public class SportsController : ControllerBase
                 Success = false,
                 Message = $"Scan failed: {ex.Message}",
                 MatchesFound = 0,
-                RecordingsScheduled = 0
+                NewRecordings = 0,
+                AlreadyScheduled = 0,
+                TotalUpcoming = 0
             });
         }
     }
@@ -783,105 +796,6 @@ public class SportsController : ControllerBase
         Plugin.Instance!.SaveConfiguration();
 
         return NoContent();
-    }
-
-    // ==================== LIBRARY ====================
-
-    /// <summary>
-    /// Gets all recordings grouped by date.
-    /// </summary>
-    [HttpGet("Library")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<Dictionary<string, List<SportsRecordingDto>>>> GetLibrary()
-    {
-        var recordings = await _libraryService.GetRecordingsByDateAsync();
-        return Ok(recordings);
-    }
-
-    /// <summary>
-    /// Gets today's recordings.
-    /// </summary>
-    [HttpGet("Library/Today")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<List<SportsRecordingDto>>> GetToday()
-    {
-        var recordings = await _libraryService.GetRecordingsByDateAsync();
-        return Ok(recordings.GetValueOrDefault("Today", new List<SportsRecordingDto>()));
-    }
-
-    /// <summary>
-    /// Gets this week's recordings.
-    /// </summary>
-    [HttpGet("Library/ThisWeek")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<List<SportsRecordingDto>>> GetThisWeek()
-    {
-        var recordings = await _libraryService.GetRecordingsByDateAsync();
-        return Ok(recordings.GetValueOrDefault("ThisWeek", new List<SportsRecordingDto>()));
-    }
-
-    /// <summary>
-    /// Gets this month's recordings.
-    /// </summary>
-    [HttpGet("Library/ThisMonth")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<List<SportsRecordingDto>>> GetThisMonth()
-    {
-        var recordings = await _libraryService.GetRecordingsByDateAsync();
-        return Ok(recordings.GetValueOrDefault("ThisMonth", new List<SportsRecordingDto>()));
-    }
-
-    /// <summary>
-    /// Gets recordings for a specific subscription.
-    /// </summary>
-    [HttpGet("Library/Subscription/{id}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<List<SportsRecordingDto>>> GetSubscriptionRecordings([FromRoute] string id)
-    {
-        var recordings = await _libraryService.GetRecordingsForSubscriptionAsync(id);
-        return Ok(recordings);
-    }
-
-    /// <summary>
-    /// Organizes existing recordings by moving them to the sports folder.
-    /// </summary>
-    [HttpPost("Library/Organize")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<ActionResult<OrganizeRecordingsResponse>> OrganizeRecordings()
-    {
-        var result = await _libraryService.OrganizeExistingRecordingsAsync();
-        return Ok(result);
-    }
-
-    /// <summary>
-    /// Checks if a file is safe to move (for post-processing script integration).
-    /// </summary>
-    [HttpGet("Library/CheckFile/{itemId}")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public ActionResult<FileSafetyCheckDto> CheckFileSafety([FromRoute] string itemId)
-    {
-        if (!Guid.TryParse(itemId, out var guid))
-        {
-            return BadRequest("Invalid item ID format");
-        }
-
-        var item = _libraryService.GetItemById(guid);
-        if (item == null)
-        {
-            return NotFound();
-        }
-
-        var isSafe = _libraryService.IsFileSafeToMove(item);
-        var fileAge = _libraryService.GetFileAge(item);
-
-        return Ok(new FileSafetyCheckDto
-        {
-            ItemId = guid,
-            IsSafeToMove = isSafe,
-            Reason = isSafe ? "File is safe to move" : "File is in use or too recent",
-            FileAgeMinutes = fileAge.TotalMinutes
-        });
     }
 }
 

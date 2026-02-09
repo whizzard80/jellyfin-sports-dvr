@@ -109,9 +109,11 @@ public class SmartScheduler
                 var allOptions = new List<MatchedProgram> { group.Primary };
                 allOptions.AddRange(group.Alternates);
 
-                // Pick best channel (prefer sports channels, then by subscription priority)
+                // Pick best channel: prefer earliest start (live > replay),
+                // then sports channels, then subscription priority
                 var best = allOptions
-                    .OrderByDescending(m => m.Scored.IsSportsChannel ? 1 : 0)
+                    .OrderBy(m => m.Program.StartDate)
+                    .ThenByDescending(m => m.Scored.IsSportsChannel ? 1 : 0)
                     .ThenByDescending(m => m.Subscription.Priority)
                     .First();
 
@@ -135,7 +137,8 @@ public class SmartScheduler
 
     /// <summary>
     /// Determines if two programs are the same game on different channels.
-    /// Accounts for delayed feeds (up to 2 hours apart) and different title formats.
+    /// For team sports: same teams within 24 hours = same game (later airing is a replay).
+    /// For non-team events: uses title similarity within a shorter window.
     /// </summary>
     private bool IsSameGame(MatchedProgram a, MatchedProgram b)
     {
@@ -148,12 +151,15 @@ public class SmartScheduler
             // Both have two teams - check if same matchup
             if (teamsA.SetEquals(teamsB))
             {
-                // Same teams - allow up to 3 hours difference for delayed feeds/replays
-                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
-                if (timeDiff <= 180)
+                // Same teams within 15 hours = same game.
+                // This catches simultaneous broadcasts on different channels
+                // AND replays/rebroadcasts later the same day, while avoiding
+                // false positives for back-to-back days (e.g., 7 PM → 2 PM next day = 19h).
+                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
+                if (timeDiff <= 15)
                 {
                     _logger.LogDebug(
-                        "Same game detected: '{TitleA}' and '{TitleB}' ({TimeDiff} min apart)",
+                        "Same game detected: '{TitleA}' and '{TitleB}' ({TimeDiff:F1}h apart)",
                         a.Program.Name, b.Program.Name, timeDiff);
                     return true;
                 }
@@ -170,12 +176,13 @@ public class SmartScheduler
         {
             if (TeamsMatch(extractedTeamsA, extractedTeamsB))
             {
-                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
-                if (timeDiff <= 180)
+                // Same teams within 15 hours = same game
+                var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
+                if (timeDiff <= 15)
                 {
                     _logger.LogDebug(
-                        "Same game detected (title match): '{TitleA}' and '{TitleB}'",
-                        a.Program.Name, b.Program.Name);
+                        "Same game detected (title match): '{TitleA}' and '{TitleB}' ({TimeDiff:F1}h apart)",
+                        a.Program.Name, b.Program.Name, timeDiff);
                     return true;
                 }
             }
@@ -189,12 +196,13 @@ public class SmartScheduler
         var similarity = CalculateSimilarity(titleA, titleB);
         if (similarity > 0.8) // Higher threshold for title-only matching
         {
-            var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
-            if (timeDiff <= 180)
+            // For non-team events, use a 6-hour window (covers delayed feeds but not next-day replays)
+            var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
+            if (timeDiff <= 6)
             {
                 _logger.LogDebug(
-                    "Same event detected (similarity {Sim:P0}): '{TitleA}' and '{TitleB}'",
-                    similarity, a.Program.Name, b.Program.Name);
+                    "Same event detected (similarity {Sim:P0}): '{TitleA}' and '{TitleB}' ({TimeDiff:F1}h apart)",
+                    similarity, a.Program.Name, b.Program.Name, timeDiff);
                 return true;
             }
         }
@@ -376,11 +384,12 @@ public class SmartScheduler
 
     /// <summary>
     /// Builds an optimized schedule respecting connection limits.
+    /// Checks for actual temporal overlap (accounting for full program duration)
+    /// so that non-overlapping games on different time slots are not blocked.
     /// </summary>
     private List<ScheduledRecording> BuildSchedule(List<GameGroup> sortedGames, int maxConcurrent)
     {
         var schedule = new List<ScheduledRecording>();
-        var activeRecordings = new List<ScheduledRecording>();
 
         foreach (var game in sortedGames)
         {
@@ -388,15 +397,18 @@ public class SmartScheduler
             var startTime = program.StartDate;
             var endTime = program.EndDate;
 
-            // Remove finished recordings from active list
-            activeRecordings.RemoveAll(r => r.EndTime <= startTime);
+            // Find all already-scheduled recordings that actually overlap with this game's
+            // time window. Two recordings overlap when: existingStart < newEnd AND existingEnd > newStart.
+            // This correctly handles games sorted by priority (not chronologically) and accounts
+            // for full program duration, not just start times.
+            var overlapping = schedule
+                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
+                .ToList();
 
-            // Check if we have capacity
-            if (activeRecordings.Count >= maxConcurrent)
+            if (overlapping.Count >= maxConcurrent)
             {
                 // No capacity - check if we should preempt a lower priority recording
-                var lowestPriority = activeRecordings
-                    .Where(r => r.StartTime < endTime && r.EndTime > startTime) // Overlapping
+                var lowestPriority = overlapping
                     .OrderBy(r => r.Priority)
                     .FirstOrDefault();
 
@@ -411,14 +423,16 @@ public class SmartScheduler
                         game.EffectivePriority);
 
                     schedule.Remove(lowestPriority);
-                    activeRecordings.Remove(lowestPriority);
                 }
                 else
                 {
                     // Can't schedule - log conflict
                     _logger.LogWarning(
-                        "Cannot schedule '{Game}' - no capacity (max {Max} concurrent)",
+                        "Cannot schedule '{Game}' at {Start}-{End} - {Count} overlapping recordings (max {Max} concurrent)",
                         program.Name,
+                        startTime.ToLocalTime().ToString("g"),
+                        endTime.ToLocalTime().ToString("g"),
+                        overlapping.Count,
                         maxConcurrent);
                     continue;
                 }
@@ -439,14 +453,15 @@ public class SmartScheduler
             };
 
             schedule.Add(recording);
-            activeRecordings.Add(recording);
 
             _logger.LogDebug(
-                "Scheduled: {Title} at {Time} on {Channel} (priority {Priority})",
+                "Scheduled: {Title} at {Start}-{End} on {Channel} (priority {Priority}, {Overlap} concurrent)",
                 recording.Title,
-                recording.StartTime.ToLocalTime(),
+                recording.StartTime.ToLocalTime().ToString("g"),
+                recording.EndTime.ToLocalTime().ToString("g"),
                 recording.ChannelName,
-                recording.Priority);
+                recording.Priority,
+                overlapping.Count + 1);
         }
 
         return schedule;

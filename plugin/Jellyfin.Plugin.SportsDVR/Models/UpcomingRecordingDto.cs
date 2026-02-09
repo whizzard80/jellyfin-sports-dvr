@@ -104,9 +104,14 @@ public class UpcomingRecordingsResponse
     public System.Collections.Generic.List<UpcomingRecordingDto> Skipped { get; set; } = new();
 
     /// <summary>
-    /// Gets or sets the total count of scheduled recordings.
+    /// Gets or sets the total count of all upcoming scheduled recordings.
     /// </summary>
     public int TotalScheduled { get; set; }
+
+    /// <summary>
+    /// Gets or sets the count of recordings in the next 48 hours.
+    /// </summary>
+    public int Upcoming48h { get; set; }
 
     /// <summary>
     /// Gets or sets the total count of skipped recordings.
@@ -150,14 +155,24 @@ public class ScanNowResponse
     public string Message { get; set; } = string.Empty;
 
     /// <summary>
-    /// Gets or sets the number of matching programs found.
+    /// Gets or sets the number of programs matching subscriptions found in EPG.
     /// </summary>
     public int MatchesFound { get; set; }
 
     /// <summary>
-    /// Gets or sets the number of recordings scheduled.
+    /// Gets or sets the number of new recordings scheduled in this scan.
     /// </summary>
-    public int RecordingsScheduled { get; set; }
+    public int NewRecordings { get; set; }
+
+    /// <summary>
+    /// Gets or sets the number of recordings that were already scheduled.
+    /// </summary>
+    public int AlreadyScheduled { get; set; }
+
+    /// <summary>
+    /// Gets or sets the total number of upcoming recordings in next 48 hours.
+    /// </summary>
+    public int TotalUpcoming { get; set; }
 }
 
 /// <summary>

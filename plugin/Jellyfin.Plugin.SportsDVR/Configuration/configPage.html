@@ -33,7 +33,7 @@
                             </div>
                             <div>
                                 <span id="statUpcoming" style="font-size: 1.5em; font-weight: bold; color: #4caf50;">0</span>
-                                <div class="fieldDescription">Upcoming (48h)</div>
+                                <div class="fieldDescription">Scheduled</div>
                             </div>
                         </div>
                     </fieldset>
@@ -122,11 +122,6 @@
                             <div class="fieldDescription checkboxFieldDescription">Match team name variations (e.g., "Man City" matches "Manchester City").</div>
                         </div>
                         
-                        <div>
-                            <button is="emby-button" type="button" class="raised button-submit block" onclick="SportsDVR.saveSettings()">
-                                <span>Save Settings</span>
-                            </button>
-                        </div>
                     </fieldset>
                     
                     <!-- Team Aliases -->
@@ -378,66 +373,13 @@
                         </div>
                     </fieldset>
                     
-                    <!-- Library Organization -->
-                    <fieldset class="verticalSection">
-                        <legend>Library Organization</legend>
-                        <p class="fieldDescription" style="margin-bottom: 1em;">
-                            Configure paths for organizing sports recordings. The plugin can move sports games from your general DVR folder to a dedicated sports folder.
-                        </p>
-                        
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="sportsLibraryName">Sports Library Name</label>
-                            <input type="text" id="sportsLibraryName" is="emby-input" placeholder="Sports DVR">
-                            <div class="fieldDescription">Name of Jellyfin library for viewing sports recordings</div>
-                        </div>
-                        
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="dvrRecordingsPath">DVR Recordings Path (Source)</label>
-                            <input type="text" id="dvrRecordingsPath" is="emby-input" placeholder="/mnt/movies/hyperdata/dvr/">
-                            <div class="fieldDescription">Where Jellyfin DVR and post-processor dump all recordings. Sports games will be scanned from here.</div>
-                        </div>
-                        
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="sportsRecordingsPath">Sports DVR Path (Destination)</label>
-                            <input type="text" id="sportsRecordingsPath" is="emby-input" placeholder="/mnt/movies/hyperdata/dvr/sports-dvr/">
-                            <div class="fieldDescription">Where sports games will be moved to. Should match your Sports DVR library path.</div>
-                        </div>
-                        
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="folderOrganization">Folder Organization</label>
-                            <select id="folderOrganization" is="emby-select">
-                                <option value="Subscription">By Subscription (Team/League/Event)</option>
-                                <option value="Date">By Date (2026-02-05)</option>
-                                <option value="League">By League then Date (NBA/2026-02-05)</option>
-                                <option value="League_Date">By League and Date (NBA_2026-02-05)</option>
-                                <option value="None">Flat Structure (no subfolders)</option>
-                            </select>
-                            <div class="fieldDescription">How to organize recordings into subfolders</div>
-                        </div>
-                        
-                        <div class="checkboxContainer checkboxContainer-withDescription">
-                            <label class="emby-checkbox-label">
-                                <input type="checkbox" id="autoOrganizeRecordings" is="emby-checkbox">
-                                <span>Auto-organize recordings</span>
-                            </label>
-                            <div class="fieldDescription checkboxFieldDescription">
-                                Automatically move matching recordings to sports folder after post-processing
-                            </div>
-                        </div>
-                        
-                        <div style="margin-top: 1em;">
-                            <button type="button" id="organizeRecordings" is="emby-button" class="raised button-submit">
-                                <span>Organize Existing Recordings</span>
-                            </button>
-                            <div class="fieldDescription">
-                                One-time: Scan "DVR Recordings" library and move all sports games (matching subscriptions OR detected as sports) to Sports DVR folder. Going forward, organization is handled automatically by the post-processing script.
-                            </div>
-                            <div class="fieldDescription" style="color: #f0ad4e; margin-top: 0.5em;">
-                                ⚠️ <strong>Caution:</strong> This will rename files in the source DVR path that match with sports recordings!
-                            </div>
-                            <div id="organizeStatus" style="margin-top: 0.5em; display: none;"></div>
-                        </div>
-                    </fieldset>
+                    <!-- Save Settings -->
+                    <div style="margin-top: 1.5em;">
+                        <button is="emby-button" type="button" class="raised button-submit block" onclick="SportsDVR.saveSettings()" style="padding: 0.8em 1.5em; font-size: 1.1em;">
+                            <span class="material-icons" style="font-size: 1em; vertical-align: middle; margin-right: 0.3em;">save</span>
+                            <span style="vertical-align: middle;">Save Settings</span>
+                        </button>
+                    </div>
                     
                 </form>
             </div>
@@ -467,12 +409,6 @@
                         await this.loadCustomAliases();
                         await this.loadUpcomingRecordings();
                         
-                        // Bind organize button directly
-                        const organizeBtn = document.getElementById('organizeRecordings');
-                        if (organizeBtn) {
-                            organizeBtn.onclick = () => this.organizeRecordings();
-                        }
-                        
                         // Auto-refresh upcoming every 5 minutes
                         setInterval(() => this.loadUpcomingRecordings(), 5 * 60 * 1000);
                     },
@@ -486,11 +422,6 @@
                         document.getElementById('scanInterval').value = config.ScanIntervalMinutes || 5;
                         document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
                         document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
-                        document.getElementById('sportsLibraryName').value = config.SportsLibraryName || 'Sports DVR';
-                        document.getElementById('dvrRecordingsPath').value = config.DvrRecordingsPath || '/mnt/movies/hyperdata/dvr/';
-                        document.getElementById('sportsRecordingsPath').value = config.SportsRecordingsPath || '/mnt/movies/hyperdata/dvr/sports-dvr/';
-                        document.getElementById('folderOrganization').value = config.FolderOrganization || 'League';
-                        document.getElementById('autoOrganizeRecordings').checked = config.AutoOrganizeRecordings || false;
                     } catch (e) {
                         console.error('Failed to load settings:', e);
                     }
@@ -505,11 +436,6 @@
                         config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);
                         config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
-                        config.SportsLibraryName = document.getElementById('sportsLibraryName').value || 'Sports DVR';
-                        config.DvrRecordingsPath = document.getElementById('dvrRecordingsPath').value || '/mnt/movies/hyperdata/dvr/';
-                        config.SportsRecordingsPath = document.getElementById('sportsRecordingsPath').value || '/mnt/movies/hyperdata/dvr/sports-dvr/';
-                        config.FolderOrganization = document.getElementById('folderOrganization').value || 'League';
-                        config.AutoOrganizeRecordings = document.getElementById('autoOrganizeRecordings').checked;
                         
                         await ApiClient.updatePluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890', config);
                         Dashboard.alert('Settings saved!');
@@ -881,38 +807,6 @@
                     return div.innerHTML;
                 },
                 
-                async organizeRecordings() {
-                    const btn = document.getElementById('organizeRecordings');
-                    const status = document.getElementById('organizeStatus');
-                    btn.disabled = true;
-                    status.style.display = 'block';
-                    status.textContent = 'Organizing...';
-                    
-                    try {
-                        const response = await ApiClient.ajax({
-                            url: this.getApiUrl('Library/Organize'),
-                            type: 'POST',
-                            dataType: 'json'
-                        });
-                        
-                        status.innerHTML = '<strong>Complete!</strong><br>' +
-                            'Scanned: ' + response.Scanned + '<br>' +
-                            'Matched: ' + response.Matched + '<br>' +
-                            'Moved: ' + response.Moved + '<br>' +
-                            'Skipped: ' + response.Skipped + '<br>' +
-                            'Failed: ' + response.Failed;
-                        
-                        if (response.Errors && response.Errors.length > 0) {
-                            status.innerHTML += '<br><br><strong>Errors:</strong><br>' + response.Errors.join('<br>');
-                        }
-                    } catch (error) {
-                        status.textContent = 'Error: ' + (error.message || 'Unknown error');
-                        console.error('Organization error:', error);
-                    } finally {
-                        btn.disabled = false;
-                    }
-                },
-                
                 async refreshUpcoming() {
                     await this.loadUpcomingRecordings();
                 },
@@ -935,7 +829,19 @@
                         });
                         
                         status.style.color = '#4caf50';
-                        status.innerHTML = '✅ Scan complete! Found ' + (result.MatchesFound || 0) + ' matches, scheduled ' + (result.RecordingsScheduled || 0) + ' recordings.';
+                        var parts = ['✅ Scan complete!'];
+                        parts.push('Found ' + (result.MatchesFound || 0) + ' matches.');
+                        if ((result.NewRecordings || 0) > 0) {
+                            parts.push(result.NewRecordings + ' new recordings scheduled.');
+                        }
+                        if ((result.AlreadyScheduled || 0) > 0) {
+                            parts.push(result.AlreadyScheduled + ' already scheduled.');
+                        }
+                        if ((result.MatchesFound || 0) === 0 && (result.NewRecordings || 0) === 0 && (result.AlreadyScheduled || 0) === 0) {
+                            parts.push('No matching programs found.');
+                        }
+                        parts.push('Total upcoming: ' + (result.TotalUpcoming || 0) + '.');
+                        status.innerHTML = parts.join(' ');
                         
                         // Refresh the upcoming list
                         await this.loadUpcomingRecordings();
@@ -1012,7 +918,7 @@
                         
                         // Render list
                         if (!data.Scheduled || data.Scheduled.length === 0) {
-                            container.innerHTML = '<p class="fieldDescription">No games scheduled for the next 48 hours.</p>';
+                            container.innerHTML = '<p class="fieldDescription">No upcoming games scheduled.</p>';
                             return;
                         }
                         

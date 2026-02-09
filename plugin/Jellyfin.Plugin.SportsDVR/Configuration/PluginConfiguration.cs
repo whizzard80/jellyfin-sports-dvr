@@ -62,39 +62,6 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool EnableAliasMatching { get; set; }
 
     /// <summary>
-    /// Gets or sets the Jellyfin library name for sports recordings.
-    /// Default: "Sports DVR"
-    /// </summary>
-    public string SportsLibraryName { get; set; } = "Sports DVR";
-
-    /// <summary>
-    /// Gets or sets the path where DVR/post-processor dumps all recordings (SOURCE).
-    /// This is where the organize function looks for sports games to move.
-    /// Default: /mnt/movies/hyperdata/dvr/
-    /// </summary>
-    public string DvrRecordingsPath { get; set; } = "/mnt/movies/hyperdata/dvr/";
-
-    /// <summary>
-    /// Gets or sets the path where sports recordings should be moved to (DESTINATION).
-    /// Sports games found in DvrRecordingsPath will be moved here.
-    /// Default: /mnt/movies/hyperdata/dvr/sports-dvr/
-    /// </summary>
-    public string SportsRecordingsPath { get; set; } = "/mnt/movies/hyperdata/dvr/sports-dvr/";
-
-    /// <summary>
-    /// Gets or sets the folder organization strategy for sports recordings.
-    /// Options: "Subscription" (by team/league/event), "Date" (by date), "League" (by league then date), "None" (flat structure)
-    /// Default: "League"
-    /// </summary>
-    public string FolderOrganization { get; set; } = "League";
-
-    /// <summary>
-    /// Gets or sets whether to automatically organize recordings into sports folder.
-    /// If true, plugin will move matching recordings to SportsRecordingsPath.
-    /// </summary>
-    public bool AutoOrganizeRecordings { get; set; } = false;
-
-    /// <summary>
     /// Gets or sets the primary region for time-based filtering.
     /// This affects when live games are expected to air.
     /// Options: "USA", "Europe", "Asia", "Australia", "All" (no time filtering)
