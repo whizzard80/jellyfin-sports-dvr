@@ -4,6 +4,12 @@
 
 A Jellyfin plugin for smart sports recording with team subscriptions and automatic scheduling.
 
+> **Important:** This plugin is designed to work with **[Teamarr](https://github.com/Teamarr/Teamarr)** and
+> **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)**. Teamarr provides clean, structured EPG data
+> with `<live>` tags and proper team-vs-team formatting that the plugin relies on for accurate matching.
+> Raw IPTV provider EPG data (without Teamarr) will produce poor results -- see
+> [Why Teamarr is Required](#why-teamarr-is-required) below.
+
 ## Features
 
 - **Team Subscriptions** - Subscribe to your favorite teams and automatically record all their games
@@ -14,7 +20,20 @@ A Jellyfin plugin for smart sports recording with team subscriptions and automat
 - **Same-Game Deduplication** - Won't record the same game on multiple channels
 - **Connection-Aware Scheduling** - Respects your IPTV connection limits (1, 2, 6, etc.)
 - **Priority-Based Conflicts** - Higher priority subscriptions win tuner slots
-- **Teamarr/Dispatcharr Compatible** - Works great with `<live>` tagged EPGs
+- **Teamarr + Dispatcharr Integration** - Built for `<live>` tagged EPGs with clean matchup titles
+
+## Required Stack
+
+| Component | Purpose |
+|-----------|---------|
+| **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** | IPTV channel management, M3U/EPG output to Jellyfin |
+| **[Teamarr](https://github.com/Teamarr/Teamarr)** | Matches IPTV streams to sports events, renames channels with clean titles and `<live>` tags |
+| **Jellyfin** | Media server with Live TV/DVR configured |
+| **This Plugin** | Scans the Teamarr-enriched EPG and schedules recordings |
+
+```
+IPTV Provider → Dispatcharr → Teamarr → Dispatcharr EPG Output → Jellyfin → Sports DVR Plugin
+```
 
 ## Installation
 
@@ -26,7 +45,7 @@ A Jellyfin plugin for smart sports recording with team subscriptions and automat
 3. Restart Jellyfin
 4. Go to **Dashboard → Plugins → Sports DVR** to configure
 
-That's it! No additional software required.
+**Prerequisites:** Dispatcharr and Teamarr must be set up and feeding EPG data into Jellyfin's Live TV before the plugin will find matches.
 
 ## How It Works
 
@@ -77,14 +96,36 @@ That's it! No additional software required.
 | **Priority** | 1-100, higher wins conflicts (default: 50) |
 | **Include Replays** | Record replays/encores/classics (default: off) |
 
+## Why Teamarr is Required
+
+The plugin's matching engine depends on the clean, structured EPG data that Teamarr provides. Without Teamarr, raw IPTV provider EPG data is unreliable:
+
+| Signal | With Teamarr | Raw Provider EPG |
+|--------|-------------|-----------------|
+| **`<live>` tag** | Set on all live games | Almost never set |
+| **Program title** | `"Chicago Bulls at Boston Celtics"` | `"NBA Basketball"` (generic) |
+| **Team names** | In the title | Buried in description or missing |
+| **League name** | In EpisodeTitle field | Appears more on talk shows than games |
+| **Replay detection** | Clean titles, easy to filter | Replays have better titles than live games |
+| **Channel naming** | `"NBA: Bulls at Celtics"` | `"USA ESPN"` (no game info) |
+
+**What happens without Teamarr:**
+- League subscriptions (e.g., "NBA") match studio shows ("NBA Today", "NBA Countdown") more than actual games
+- Team subscriptions find zero matches because team names aren't in the title
+- "Premier League" matches only highlight reels, not real matches
+- UFC/Boxing subscriptions match 24/7 replay channels full of old fights
+- The `<live>` tag that the plugin uses to distinguish real games from replays is missing entirely
+
+**Bottom line:** Teamarr transforms messy IPTV data into clean, machine-readable EPG entries. This plugin is the scheduling engine that acts on that clean data.
+
 ## LIVE Detection
 
-The plugin filters out non-live content:
+The plugin's core filtering relies on the `<live>` EPG tag that Teamarr sets on live game broadcasts.
 
 ### ✅ Will Record
-- Programs with `<live>` EPG tag (Teamarr/Dispatcharr)
+- Programs with `<live>` EPG tag **(set by Teamarr)**
 - Titles with "LIVE:" or "(Live)"
-- Games in appropriate time windows:
+- Games with matchup patterns (vs/@/at) in appropriate time windows:
   - **USA Sports** (NBA, NFL, NHL, MLB): 12 PM - 12 AM EST
   - **European Football** (Premier League, Serie A): 6 AM - 4 PM EST
 
@@ -95,6 +136,7 @@ The plugin filters out non-live content:
 - Old events with years: "(2008)", "(2016)"
 - Past UFC events (UFC 273, UFC 311, etc.)
 - Non-sports with "Premier League" (cricket T20, karate)
+- Generic league titles without `<live>` tag (e.g., bare "NBA Basketball")
 
 ## Connection Scaling
 
@@ -129,87 +171,37 @@ When slots are full, higher priority subscriptions preempt lower ones.
 | `/SportsDVR/Subscriptions/{id}` | PUT | Update subscription |
 | `/SportsDVR/Subscriptions/{id}` | DELETE | Delete subscription |
 | `/SportsDVR/Status` | GET | Plugin status |
-| `/SportsDVR/Aliases` | GET/POST | Manage team aliases |
-| `/SportsDVR/Library/CheckFile/{itemId}` | GET | Check if file is safe to move (for post-processing scripts) |
+| `/SportsDVR/Schedule/ScanNow` | POST | Trigger immediate EPG scan |
+| `/SportsDVR/Schedule/Upcoming` | GET | Get upcoming scheduled recordings |
+| `/SportsDVR/Schedule/ClearCache` | POST | Reset internal schedule tracking |
+| `/SportsDVR/Aliases/{teamName}` | GET | Lookup team aliases |
+| `/SportsDVR/Aliases/Custom` | GET/POST/DELETE | Manage custom team aliases |
+| `/SportsDVR/Analysis/EpgStats` | GET | EPG analysis with scoring breakdown |
+| `/SportsDVR/Analysis/TestSubscriptions` | GET | Test subscriptions against current EPG |
+| `/SportsDVR/Analysis/ScoreTitle` | POST | Score a single title for testing |
 
-## Post-Processing Script Integration
-
-If you use a post-processing script with Jellyfin (for transcoding, commercial skipping, etc.), you can integrate it with Sports DVR to prevent moving files that are in use.
-
-### Option 1: Use Plugin API (Recommended)
-
-The plugin provides an API endpoint to check if a file is safe to move:
-
-```bash
-#!/bin/bash
-# Example: Check if file is safe before moving
-
-RECORDING_PATH="$1"
-JELLYFIN_URL="http://localhost:8096"
-API_KEY="your-jellyfin-api-key"
-
-# Extract item ID from recording (you'll need to parse this from Jellyfin metadata)
-ITEM_ID="..." # Get from Jellyfin recording info
-
-# Check if plugin says file is safe to move
-RESPONSE=$(curl -s -H "X-Emby-Token: $API_KEY" \
-    "$JELLYFIN_URL/SportsDVR/Library/CheckFile/$ITEM_ID")
-
-if echo "$RESPONSE" | grep -q '"isSafeToMove":true'; then
-    # File is safe, proceed with post-processing
-    # ... your transcoding/moving logic here ...
-else
-    echo "File is in use or too recent, skipping post-processing..."
-    exit 0
-fi
-```
-
-### Option 2: Check File Locks Directly
-
-Alternatively, check if the file is locked before moving:
-
-```bash
-#!/bin/bash
-# Check if file is in use before moving
-
-RECORDING_PATH="$1"
-
-# Method 1: Use lsof
-if lsof "$RECORDING_PATH" >/dev/null 2>&1; then
-    echo "File is in use, skipping..."
-    exit 0
-fi
-
-# Method 2: Use flock
-(
-    flock -n 9 || exit 1
-    # Move/transcode file here
-) 9>"$RECORDING_PATH.lock"
-```
-
-**Note**: Post-processing script integration is optional. If you don't use post-processing scripts, the plugin's organization feature will handle everything automatically with built-in safeguards (1.5 hour delay, playback checks, file lock detection).
+> **Note:** All endpoints require admin authentication. Use `?api_key=YOUR_KEY` or
+> the `X-Emby-Token` header. Create an API key in **Dashboard > API Keys**.
 
 ## Building from Source
 
 For developers only:
 
 ```bash
-# Requires .NET 8.0 SDK
+# Requires .NET 8.0+ SDK
 cd plugin/Jellyfin.Plugin.SportsDVR
 dotnet build -c Release
 ```
 
-Output: `bin/Release/net8.0/Jellyfin.Plugin.SportsDVR.dll`
+Output: `bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll`
 
 ## Requirements
 
 - Jellyfin 10.9+
-- Live TV configured with EPG data
+- Live TV configured with Teamarr-enriched EPG data
+- [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) for IPTV channel management
+- [Teamarr](https://github.com/Teamarr/Teamarr) for sports event matching and `<live>` tagging
 
 ## License
 
 MIT License - see [LICENSE](LICENSE)
-
----
-
-Built for sports fans who want automatic game recording without spoilers. 🏀⚽🏒🥊
