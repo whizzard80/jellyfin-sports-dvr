@@ -1,14 +1,14 @@
 # Jellyfin Automatic Sports DVR
 ## Schedules teams, leagues, or events from your EPG data
 
-**Use this stack:** **[Teamarr](https://github.com/Teamarr/Teamarr)** → **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** → **this plugin** (in Jellyfin).  
+**Use this stack:** **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** → **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** → **this plugin** (in Jellyfin).  
 Teamarr matches sports to streams and tags them; Dispatcharr serves the M3U/EPG to Jellyfin; this plugin schedules recordings from that guide.
 
 ---
 
 A Jellyfin plugin for smart sports recording with team subscriptions and automatic scheduling.
 
-> **Important:** This plugin is designed to work with **[Teamarr](https://github.com/Teamarr/Teamarr)** and
+> **Important:** This plugin is designed to work with **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** and
 > **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)**. Teamarr provides clean, structured EPG data
 > with `<live>` tags and proper team-vs-team formatting that the plugin relies on for accurate matching.
 > Raw IPTV provider EPG data (without Teamarr) will produce poor results -- see
@@ -31,7 +31,7 @@ A Jellyfin plugin for smart sports recording with team subscriptions and automat
 | Component | Purpose |
 |-----------|---------|
 | **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** | IPTV channel management, M3U/EPG output to Jellyfin |
-| **[Teamarr](https://github.com/Teamarr/Teamarr)** | Matches IPTV streams to sports events, renames channels with clean titles and `<live>` tags |
+| **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** | Matches IPTV streams to sports events, renames channels with clean titles and `<live>` tags |
 | **Jellyfin** | Media server with Live TV/DVR configured |
 | **This Plugin** | Scans the Teamarr-enriched EPG and schedules recordings |
 
@@ -204,7 +204,7 @@ Output: `bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll`
 - Jellyfin 10.9+
 - Live TV configured with Teamarr-enriched EPG data
 - [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) for IPTV channel management
-- [Teamarr](https://github.com/Teamarr/Teamarr) for sports event matching and `<live>` tagging
+- [Teamarr](https://github.com/Pharaoh-Labs/teamarr) for sports event matching and `<live>` tagging
 
 ## License
 
