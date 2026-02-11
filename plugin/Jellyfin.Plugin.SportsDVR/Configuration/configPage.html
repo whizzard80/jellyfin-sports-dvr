@@ -78,8 +78,8 @@
                         
                         <div class="inputContainer">
                             <label class="inputLabel" for="maxConcurrent">Max Concurrent Recordings</label>
-                            <input type="number" id="maxConcurrent" min="1" max="10" value="2" is="emby-input">
-                            <div class="fieldDescription">Number of tuners/streams available (e.g., 2 for most IPTV)</div>
+                            <input type="number" id="maxConcurrent" min="1" max="20" value="2" is="emby-input">
+                            <div class="fieldDescription"><strong>Must match your Live TV tuner limit.</strong> Set this to the same value as your tuner's &quot;Simultaneous stream limit&quot; (Dashboard → Live TV → your tuner). The plugin will never schedule more than this many recordings at the same time (e.g. 2 for most IPTV).</div>
                         </div>
                         
                         <div class="inputContainer">
@@ -430,7 +430,8 @@
                 async saveSettings() {
                     try {
                         const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
-                        config.MaxConcurrentRecordings = parseInt(document.getElementById('maxConcurrent').value);
+                        var maxConcurrent = parseInt(document.getElementById('maxConcurrent').value) || 2;
+                        config.MaxConcurrentRecordings = Math.min(20, Math.max(1, maxConcurrent));
                         config.DefaultPriority = parseInt(document.getElementById('defaultPriority').value);
                         config.PrimaryRegion = document.getElementById('primaryRegion').value || 'USA';
                         config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);

@@ -100,8 +100,10 @@ public class RecordingScheduler
             return result;
         }
 
-        var maxConcurrent = config.MaxConcurrentRecordings > 0 
-            ? config.MaxConcurrentRecordings 
+        // Respect plugin setting; clamp to valid range so we never exceed tuner capacity.
+        // This must match your Jellyfin Live TV tuner "Simultaneous stream limit" (Dashboard → Live TV).
+        var maxConcurrent = config.MaxConcurrentRecordings > 0
+            ? Math.Min(Math.Max(config.MaxConcurrentRecordings, 1), 20)
             : DEFAULT_MAX_CONCURRENT;
 
         _logger.LogInformation(
@@ -127,6 +129,12 @@ public class RecordingScheduler
                 existingTimers
                     .Select(t => t.ProgramId)
                     .Where(id => !string.IsNullOrEmpty(id))!);
+
+            // Also build (channel + start time + name) keys so we don't re-schedule the same slot
+            // when program IDs change across EPG refreshes or when multiple scans run
+            var existingTimerKeys = new HashSet<string>(
+                existingTimers.Select(t => BuildTimerKey(t.Name, t.ChannelId.ToString(), t.StartDate)),
+                StringComparer.OrdinalIgnoreCase);
 
             // Step 3: Find all matching programs
             var matches = new List<MatchedProgram>();
@@ -169,8 +177,11 @@ public class RecordingScheduler
                     continue;
                 }
 
-                // Skip if already scheduled (but still count them)
-                if (existingProgramIds.Contains(program.Id) || _scheduledPrograms.Contains(program.Id))
+                // Skip if already scheduled (by program ID, timer key, or in-memory cache)
+                var timerKey = BuildTimerKey(program.Name, program.ChannelGuid.ToString(), program.StartDate);
+                if (existingProgramIds.Contains(program.Id)
+                    || _scheduledPrograms.Contains(program.Id)
+                    || existingTimerKeys.Contains(timerKey))
                 {
                     alreadyScheduledCount++;
                     continue;
@@ -538,6 +549,13 @@ public class RecordingScheduler
             return true;
         }
 
+        // Exclude Teamarr pre-game/post-game filler (record the actual game, not the placeholder)
+        if (Regex.IsMatch(titleLower, @"\bgame\s+starting\s+at\b") ||
+            Regex.IsMatch(titleLower, @"\bgame\s+complete\b"))
+        {
+            return false;
+        }
+
         // Exclude obvious non-live content
         var nonLivePatterns = new[] {
             "channel", "network", "tv", "24/7",            // Channel names
@@ -767,6 +785,19 @@ public class RecordingScheduler
         }
 
         return string.Join(" | ", parts);
+    }
+
+    /// <summary>
+    /// Builds a dedup key from program name, channel, and start time so we don't create
+    /// duplicate timers when program IDs change across EPG refreshes or when scans run multiple times.
+    /// </summary>
+    private static string BuildTimerKey(string? name, string? channelId, DateTime startDate)
+    {
+        var normalizedName = (name ?? string.Empty).ToLowerInvariant().Trim();
+        var channel = channelId ?? string.Empty;
+        var roundedTime = new DateTime(startDate.Year, startDate.Month, startDate.Day,
+            startDate.Hour, startDate.Minute, 0, DateTimeKind.Utc);
+        return $"{normalizedName}|{channel}|{roundedTime:yyyyMMddHHmm}";
     }
 
     private static bool IsRegexPattern(string pattern)

@@ -26,7 +26,8 @@ public class PluginConfiguration : BasePluginConfiguration
 
     /// <summary>
     /// Gets or sets the maximum number of concurrent recordings.
-    /// Limited by tuner/IPTV connection count.
+    /// Must match the Jellyfin Live TV tuner "Simultaneous stream limit" so we never
+    /// schedule more recordings at once than the tuner allows. Capped at 1-20 in the scheduler.
     /// </summary>
     public int MaxConcurrentRecordings { get; set; }
 
