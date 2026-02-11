@@ -1,8 +1,8 @@
 # Jellyfin Automatic Sports DVR
-## Schedules teams, leagues, or events from your EPG data
+## Schedules teams, leagues, or events from your Teamarr EPG data
 
-**Use this stack:** **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** → **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** → **this plugin** (in Jellyfin).  
-Teamarr matches sports to streams and tags them; Dispatcharr serves the M3U/EPG to Jellyfin; this plugin schedules recordings from that guide.
+**Use this stack:** **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** → **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** → **this plugin** (in Jellyfin) → optionally **[Comskip](https://github.com/whizzard80/Comskip)**.  
+Teamarr matches sports to streams and tags them; Dispatcharr serves the M3U/EPG to Jellyfin; this plugin schedules recordings from that guide. Teamarr does the heavy lifting—as long as your IPTV / Cable / Satellite / OTA provider has EPG data, you can plug it in for proper results. Without this stack, you must rely on Jellyfin's built-in "record series," which can lead to errors. For a consistent, archivable library of games, add [Comskip](https://github.com/whizzard80/Comskip) with its [sports-dvr config](https://github.com/whizzard80/Comskip/tree/sports-detection/sports-dvr) to strip commercials from recordings.
 
 ---
 
@@ -34,9 +34,10 @@ A Jellyfin plugin for smart sports recording with team subscriptions and automat
 | **[Teamarr](https://github.com/Pharaoh-Labs/teamarr)** | Matches IPTV streams to sports events, renames channels with clean titles and `<live>` tags |
 | **Jellyfin** | Media server with Live TV/DVR configured |
 | **This Plugin** | Scans the Teamarr-enriched EPG and schedules recordings |
+| **[Comskip](https://github.com/whizzard80/Comskip)** *(optional)* | Commercial detection for sports—[sports-dvr config](https://github.com/whizzard80/Comskip/tree/sports-detection/sports-dvr) strips ads for a clean archive |
 
 ```
-IPTV Provider → Dispatcharr → Teamarr → Dispatcharr EPG Output → Jellyfin → Sports DVR Plugin
+IPTV Provider → Dispatcharr → Teamarr → Dispatcharr EPG Output → Jellyfin → Sports DVR Plugin → Comskip (optional)
 ```
 
 ## Installation
@@ -205,6 +206,7 @@ Output: `bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll`
 - Live TV configured with Teamarr-enriched EPG data
 - [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) for IPTV channel management
 - [Teamarr](https://github.com/Pharaoh-Labs/teamarr) for sports event matching and `<live>` tagging
+- [Comskip](https://github.com/whizzard80/Comskip) *(optional)* — sports-tuned commercial detection; [sports-dvr config](https://github.com/whizzard80/Comskip/tree/sports-detection/sports-dvr) for Jellyfin integration
 
 ## License
 
