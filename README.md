@@ -1,6 +1,10 @@
 # Jellyfin Automatic Sports DVR
 ## Schedules teams, leagues, or events from your EPG data
 
+**Use this stack:** **[Teamarr](https://github.com/Teamarr/Teamarr)** → **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** → **this plugin** (in Jellyfin).  
+Teamarr matches sports to streams and tags them; Dispatcharr serves the M3U/EPG to Jellyfin; this plugin schedules recordings from that guide.
+
+---
 
 A Jellyfin plugin for smart sports recording with team subscriptions and automatic scheduling.
 
