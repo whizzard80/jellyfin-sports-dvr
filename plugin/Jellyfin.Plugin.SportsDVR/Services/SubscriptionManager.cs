@@ -103,7 +103,7 @@ public class SubscriptionManager
         existing.Type = subscription.Type;
         existing.MatchPattern = subscription.MatchPattern;
         existing.ExcludePatterns = subscription.ExcludePatterns;
-        existing.Priority = subscription.Priority;
+        existing.SortOrder = subscription.SortOrder;
         existing.IncludeReplays = subscription.IncludeReplays;
         existing.Enabled = subscription.Enabled;
 

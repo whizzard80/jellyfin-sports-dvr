@@ -50,7 +50,13 @@ public class SmartScheduler
 
         // Step 1: Detect and group duplicate broadcasts (same game on multiple channels)
         var uniqueGames = DeduplicateGames(matches);
-        _logger.LogInformation("After deduplication: {Count} unique games", uniqueGames.Count);
+        _logger.LogInformation("After deduplication: {Count} unique games (from {Total} matches)", uniqueGames.Count, matches.Count);
+        if (matches.Count > 3 && uniqueGames.Count == 1)
+        {
+            _logger.LogWarning(
+                "Deduplication collapsed {MatchCount} matches into 1 game. If these were different games, check EPG titles have team names or vs/@/at (e.g. 'Celtics at Lakers').",
+                matches.Count);
+        }
 
         // Step 2: Sort by priority (highest first) then by start time
         var sortedGames = uniqueGames
@@ -110,11 +116,11 @@ public class SmartScheduler
                 allOptions.AddRange(group.Alternates);
 
                 // Pick best channel: prefer earliest start (live > replay),
-                // then sports channels, then subscription priority
+                // then sports channels, then subscription sort order (lower = higher priority)
                 var best = allOptions
                     .OrderBy(m => m.Program.StartDate)
                     .ThenByDescending(m => m.Scored.IsSportsChannel ? 1 : 0)
-                    .ThenByDescending(m => m.Subscription.Priority)
+                    .ThenBy(m => m.Subscription.SortOrder)
                     .First();
 
                 if (best != group.Primary)
@@ -189,20 +195,21 @@ public class SmartScheduler
             return false;
         }
 
-        // Fall back to title similarity for non-team sports (UFC, etc.)
+        // Fall back to title similarity only for non-team events (e.g. UFC Main Card).
+        // Use a TIGHT time window (30 min) so we only merge same broadcast on different channels,
+        // not different games that share a generic title (e.g. "Live NBA Basketball" at 7pm and 10pm).
         var titleA = NormalizeTitle(a.Program.Name ?? "");
         var titleB = NormalizeTitle(b.Program.Name ?? "");
         
         var similarity = CalculateSimilarity(titleA, titleB);
-        if (similarity > 0.8) // Higher threshold for title-only matching
+        if (similarity > 0.8)
         {
-            // For non-team events, use a 6-hour window (covers delayed feeds but not next-day replays)
-            var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
-            if (timeDiff <= 6)
+            var timeDiffMinutes = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalMinutes);
+            if (timeDiffMinutes <= 30)
             {
                 _logger.LogDebug(
-                    "Same event detected (similarity {Sim:P0}): '{TitleA}' and '{TitleB}' ({TimeDiff:F1}h apart)",
-                    similarity, a.Program.Name, b.Program.Name, timeDiff);
+                    "Same event detected (similarity {Sim:P0}): '{TitleA}' and '{TitleB}' ({TimeDiff:F0} min apart)",
+                    similarity, a.Program.Name, b.Program.Name, timeDiffMinutes);
                 return true;
             }
         }
@@ -495,10 +502,12 @@ public class GameGroup
     public List<MatchedProgram> Alternates { get; set; } = new();
 
     /// <summary>
-    /// Gets the effective priority (subscription priority + type bonus).
-    /// Team subscriptions get a slight bonus over league subscriptions.
+    /// Gets the effective priority for scheduling.
+    /// Derived from subscription list order (SortOrder 0 = most important).
+    /// Inverted so that higher value = higher priority for OrderByDescending sorting.
+    /// Team subscriptions get a +10 bonus over league/event subscriptions at the same position.
     /// </summary>
-    public int EffectivePriority => Primary.Subscription.Priority +
+    public int EffectivePriority => (1000 - Primary.Subscription.SortOrder) +
         (Primary.Subscription.Type == SubscriptionType.Team ? 10 : 0);
 }
 
@@ -521,9 +530,6 @@ public class ScheduledRecording
 
     /// <summary>Gets or sets the start time.</summary>
     public DateTime StartTime { get; set; }
-
-    /// <summary>Gets or sets the end time.</summary>
-    public DateTime EndDate { get; set; }
 
     /// <summary>Gets or sets the end time.</summary>
     public DateTime EndTime { get; set; }

@@ -11,7 +11,7 @@
         <div data-role="content">
             <div class="content-primary">
                 <h2>Sports DVR</h2>
-                <p>Automatically record sports based on team, league, or event subscriptions.</p>
+                <p>Subscribe to your favorite teams, leagues, and events. The plugin scans the EPG, deduplicates games, and automatically schedules recordings with smart priority and concurrency management.</p>
                 
                 <form id="SportsDVRConfigForm">
                     
@@ -50,10 +50,25 @@
                                 <span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_sweep</span>
                                 <span style="vertical-align: middle;">Clear Schedule Cache</span>
                             </button>
+                            <button is="emby-button" type="button" class="raised button-accent" onclick="SportsDVR.purgeGuideCache()" id="purgeGuideCacheBtn">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">cleaning_services</span>
+                                <span style="vertical-align: middle;">Purge Guide Cache</span>
+                            </button>
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.clearTimers()" id="clearTimersBtn" style="background: #d32f2f;">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">event_busy</span>
+                                <span style="vertical-align: middle;">Clear Recording Schedule</span>
+                            </button>
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.clearAllTimers()" id="clearAllTimersBtn" style="background: #b71c1c;">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_forever</span>
+                                <span style="vertical-align: middle;">Clear ALL Timers</span>
+                            </button>
                         </div>
                         <div class="fieldDescription" style="margin-top: 0.5em;">
                             <strong>Scan EPG Now:</strong> Immediately scan the guide for matching programs and schedule recordings.<br>
-                            <strong>Clear Schedule Cache:</strong> Reset the plugin's internal tracking (use after changing tuner/EPG).
+                            <strong>Clear Schedule Cache:</strong> Reset the plugin's internal tracking (use after changing tuner/EPG).<br>
+                            <strong>Purge Guide Cache:</strong> Clear Jellyfin's stale EPG cache and trigger a fresh guide refresh. Use this if the guide shows yesterday's data or &quot;Game Complete.&quot;<br>
+                            <strong>Clear Recording Schedule:</strong> Cancel Sports DVR timers (ones with our stamp). Use to wipe and rebuild the schedule.<br>
+                            <strong>Clear ALL Timers:</strong> <span style="color: #ef9a9a;">Nuclear option.</span> Cancel EVERY scheduled recording in Jellyfin — use to clean up orphaned timers from old plugin versions.
                         </div>
                         <div id="actionStatus" class="fieldDescription" style="margin-top: 0.5em; display: none;"></div>
                     </fieldset>
@@ -80,12 +95,6 @@
                             <label class="inputLabel" for="maxConcurrent">Max Concurrent Recordings</label>
                             <input type="number" id="maxConcurrent" min="1" max="20" value="2" is="emby-input">
                             <div class="fieldDescription"><strong>Must match your Live TV tuner limit.</strong> Set this to the same value as your tuner's &quot;Simultaneous stream limit&quot; (Dashboard → Live TV → your tuner). The plugin will never schedule more than this many recordings at the same time (e.g. 2 for most IPTV).</div>
-                        </div>
-                        
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="defaultPriority">Default Priority (1-100)</label>
-                            <input type="number" id="defaultPriority" min="1" max="100" value="50" is="emby-input">
-                            <div class="fieldDescription">Default priority for new subscriptions. Higher wins conflicts.</div>
                         </div>
                         
                         <div class="selectContainer">
@@ -122,6 +131,44 @@
                             <div class="fieldDescription checkboxFieldDescription">Match team name variations (e.g., "Man City" matches "Manchester City").</div>
                         </div>
                         
+                        <div class="checkboxContainer checkboxContainer-withDescription">
+                            <label class="emby-checkbox-label">
+                                <input type="checkbox" id="enableDailyGuideCachePurge" is="emby-checkbox" checked>
+                                <span>Purge Live TV guide cache daily</span>
+                            </label>
+                            <div class="fieldDescription checkboxFieldDescription">Clear Jellyfin's EPG cache so the guide can load fresh data (fixes stale &quot;Game Complete&quot;). Runs at most once every 24 hours during the hour below. Then run &quot;Refresh Guide Data&quot; in Dashboard → Live TV to repopulate.</div>
+                        </div>
+                        <div class="selectContainer" id="guideCachePurgeHourContainer">
+                            <label class="selectLabel" for="guideCachePurgeHour">Cache purge at</label>
+                            <select id="guideCachePurgeHour" is="emby-select">
+                                <option value="0">12 AM (midnight)</option>
+                                <option value="1">1 AM</option>
+                                <option value="2">2 AM</option>
+                                <option value="3">3 AM</option>
+                                <option value="4">4 AM</option>
+                                <option value="5">5 AM</option>
+                                <option value="6">6 AM</option>
+                                <option value="7">7 AM</option>
+                                <option value="8">8 AM</option>
+                                <option value="9">9 AM</option>
+                                <option value="10">10 AM</option>
+                                <option value="11">11 AM</option>
+                                <option value="12">12 PM (noon)</option>
+                                <option value="13">1 PM</option>
+                                <option value="14">2 PM</option>
+                                <option value="15">3 PM</option>
+                                <option value="16">4 PM</option>
+                                <option value="17">5 PM</option>
+                                <option value="18">6 PM</option>
+                                <option value="19">7 PM</option>
+                                <option value="20">8 PM</option>
+                                <option value="21">9 PM</option>
+                                <option value="22">10 PM</option>
+                                <option value="23">11 PM</option>
+                            </select>
+                            <div class="fieldDescription">Server local time. Purge runs when the EPG scan task runs during this hour.</div>
+                        </div>
+                        
                     </fieldset>
                     
                     <!-- Team Aliases -->
@@ -149,9 +196,10 @@
                         </div>
                     </fieldset>
                     
-                    <!-- Subscriptions List -->
+                    <!-- Subscriptions List (drag to reorder = priority) -->
                     <fieldset class="verticalSection">
                         <legend>Your Subscriptions</legend>
+                        <p class="fieldDescription">Drag to reorder. Top = highest priority. When recordings conflict, higher items win.</p>
                         <div id="subscriptionsList"></div>
                     </fieldset>
                     
@@ -349,12 +397,6 @@
                             <div class="fieldDescription">Comma-separated words. Programs containing these won't be recorded.</div>
                         </div>
                         
-                        <div class="inputContainer">
-                            <label class="inputLabel" for="subPriority">Priority (1-100)</label>
-                            <input type="number" id="subPriority" min="1" max="100" value="50" is="emby-input">
-                            <div class="fieldDescription">Higher priority wins when games conflict.</div>
-                        </div>
-                        
                         <div class="checkboxContainer checkboxContainer-withDescription">
                             <label class="emby-checkbox-label">
                                 <input type="checkbox" id="subReplays" is="emby-checkbox">
@@ -417,11 +459,13 @@
                     try {
                         const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
                         document.getElementById('maxConcurrent').value = config.MaxConcurrentRecordings || 2;
-                        document.getElementById('defaultPriority').value = config.DefaultPriority || 50;
                         document.getElementById('primaryRegion').value = config.PrimaryRegion || 'USA';
                         document.getElementById('scanInterval').value = config.ScanIntervalMinutes || 5;
                         document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
                         document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
+                        document.getElementById('enableDailyGuideCachePurge').checked = config.EnableDailyGuideCachePurge !== false;
+                        var purgeHour = Math.min(23, Math.max(0, parseInt(config.GuideCachePurgeHour, 10) || 4));
+                        document.getElementById('guideCachePurgeHour').value = String(purgeHour);
                     } catch (e) {
                         console.error('Failed to load settings:', e);
                     }
@@ -432,11 +476,12 @@
                         const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
                         var maxConcurrent = parseInt(document.getElementById('maxConcurrent').value) || 2;
                         config.MaxConcurrentRecordings = Math.min(20, Math.max(1, maxConcurrent));
-                        config.DefaultPriority = parseInt(document.getElementById('defaultPriority').value);
                         config.PrimaryRegion = document.getElementById('primaryRegion').value || 'USA';
                         config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);
                         config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
+                        config.EnableDailyGuideCachePurge = document.getElementById('enableDailyGuideCachePurge').checked;
+                        config.GuideCachePurgeHour = parseInt(document.getElementById('guideCachePurgeHour').value, 10) || 4;
                         
                         await ApiClient.updatePluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890', config);
                         Dashboard.alert('Settings saved!');
@@ -475,37 +520,145 @@
                             return;
                         }
                         
-                        let html = '<div class="paperList">';
-                        subscriptions.forEach(sub => {
-                            html += this.renderSubscription(sub);
+                        // Sort by sortOrder (ascending = highest priority first)
+                        subscriptions.sort(function(a, b) { return (a.sortOrder || 0) - (b.sortOrder || 0); });
+                        
+                        let html = '<div class="paperList" id="sortableSubscriptions">';
+                        subscriptions.forEach(function(sub, idx) {
+                            html += SportsDVR.renderSubscription(sub, idx);
                         });
                         html += '</div>';
                         container.innerHTML = html;
+                        
+                        // Set up drag-and-drop
+                        this.initDragAndDrop();
                     } catch (e) {
                         console.error('Failed to load subscriptions:', e);
                         container.innerHTML = '<p class="fieldDescription" style="color: #f44336;">Failed to load subscriptions</p>';
                     }
                 },
                 
-                renderSubscription(sub) {
+                renderSubscription(sub, idx) {
                     const typeNames = { 0: 'Team', 1: 'League', 2: 'Event', 'Team': 'Team', 'League': 'League', 'Event': 'Event' };
                     const typeName = typeNames[sub.type] || 'Unknown';
-                    const disabledClass = sub.enabled ? '' : ' style="opacity: 0.5;"';
+                    const disabledStyle = sub.enabled ? '' : ' opacity: 0.5;';
                     const enableText = sub.enabled ? 'Disable' : 'Enable';
+                    var rank = (idx !== undefined ? idx : sub.sortOrder || 0) + 1;
                     
                     let badges = '';
-                    if (sub.priority >= 70) badges += '<span style="background: rgba(76,175,80,0.3); padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-left: 0.5em;">High Priority</span>';
                     if (sub.includeReplays) badges += '<span style="background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-left: 0.5em;">+Replays</span>';
+                    if (!sub.enabled) badges += '<span style="background: rgba(244,67,54,0.3); padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-left: 0.5em;">Disabled</span>';
                     
-                    return '<div class="listItem listItem-border"' + disabledClass + '>' +
-                        '<div class="listItemBody two-line">' +
+                    return '<div class="listItem listItem-border" draggable="true" data-sub-id="' + sub.id + '" style="cursor: grab; user-select: none;' + disabledStyle + '">' +
+                        '<div style="width: 36px; text-align: center; font-weight: bold; color: #888; font-size: 1.2em; flex-shrink: 0;" class="drag-handle" title="Drag to reorder">' +
+                        '<span class="material-icons" style="font-size: 1em; vertical-align: middle; margin-right: 2px;">drag_indicator</span>' + rank +
+                        '</div>' +
+                        '<div class="listItemBody two-line" style="flex: 1;">' +
                         '<div class="listItemBodyText">' + this.escapeHtml(sub.name) + badges + '</div>' +
-                        '<div class="listItemBodyText secondary">' + typeName + ' · Pattern: ' + this.escapeHtml(sub.matchPattern || sub.name) + ' · Priority: ' + sub.priority + '</div>' +
+                        '<div class="listItemBodyText secondary">' + typeName + ' · Pattern: ' + this.escapeHtml(sub.matchPattern || sub.name) + '</div>' +
                         '</div>' +
                         '<button is="emby-button" type="button" class="fab mini autoSize" onclick="SportsDVR.editSubscription(\'' + sub.id + '\')" title="Edit"><span class="material-icons">edit</span></button>' +
                         '<button is="emby-button" type="button" class="fab mini autoSize" onclick="SportsDVR.toggleSubscription(\'' + sub.id + '\', ' + (!sub.enabled) + ')" title="' + enableText + '"><span class="material-icons">' + (sub.enabled ? 'pause' : 'play_arrow') + '</span></button>' +
                         '<button is="emby-button" type="button" class="fab mini autoSize" onclick="SportsDVR.deleteSubscription(\'' + sub.id + '\')" title="Delete"><span class="material-icons">delete</span></button>' +
                         '</div>';
+                },
+                
+                initDragAndDrop() {
+                    var list = document.getElementById('sortableSubscriptions');
+                    if (!list) return;
+                    
+                    var dragItem = null;
+                    var dragOverItem = null;
+                    
+                    list.addEventListener('dragstart', function(e) {
+                        dragItem = e.target.closest('[data-sub-id]');
+                        if (!dragItem) return;
+                        dragItem.style.opacity = '0.4';
+                        e.dataTransfer.effectAllowed = 'move';
+                        e.dataTransfer.setData('text/plain', dragItem.dataset.subId);
+                    });
+                    
+                    list.addEventListener('dragend', function(e) {
+                        if (dragItem) dragItem.style.opacity = '';
+                        // Remove all drag-over styling
+                        list.querySelectorAll('[data-sub-id]').forEach(function(el) {
+                            el.style.borderTop = '';
+                            el.style.borderBottom = '';
+                        });
+                        dragItem = null;
+                        dragOverItem = null;
+                    });
+                    
+                    list.addEventListener('dragover', function(e) {
+                        e.preventDefault();
+                        e.dataTransfer.dropEffect = 'move';
+                        
+                        var target = e.target.closest('[data-sub-id]');
+                        if (!target || target === dragItem) return;
+                        
+                        // Clear previous indicators
+                        list.querySelectorAll('[data-sub-id]').forEach(function(el) {
+                            el.style.borderTop = '';
+                            el.style.borderBottom = '';
+                        });
+                        
+                        // Show drop indicator
+                        var rect = target.getBoundingClientRect();
+                        var midY = rect.top + rect.height / 2;
+                        if (e.clientY < midY) {
+                            target.style.borderTop = '2px solid #00a4dc';
+                        } else {
+                            target.style.borderBottom = '2px solid #00a4dc';
+                        }
+                        dragOverItem = target;
+                    });
+                    
+                    list.addEventListener('drop', function(e) {
+                        e.preventDefault();
+                        var target = e.target.closest('[data-sub-id]');
+                        if (!target || !dragItem || target === dragItem) return;
+                        
+                        // Determine insert position
+                        var rect = target.getBoundingClientRect();
+                        var midY = rect.top + rect.height / 2;
+                        
+                        if (e.clientY < midY) {
+                            list.insertBefore(dragItem, target);
+                        } else {
+                            list.insertBefore(dragItem, target.nextSibling);
+                        }
+                        
+                        // Save new order
+                        SportsDVR.saveSubscriptionOrder();
+                    });
+                },
+                
+                async saveSubscriptionOrder() {
+                    var list = document.getElementById('sortableSubscriptions');
+                    if (!list) return;
+                    
+                    var items = list.querySelectorAll('[data-sub-id]');
+                    var orderedIds = [];
+                    items.forEach(function(item, idx) {
+                        orderedIds.push(item.dataset.subId);
+                        // Update the rank number displayed
+                        var rankEl = item.querySelector('.drag-handle');
+                        if (rankEl) {
+                            rankEl.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle; margin-right: 2px;">drag_indicator</span>' + (idx + 1);
+                        }
+                    });
+                    
+                    try {
+                        await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions/Reorder'),
+                            type: 'POST',
+                            data: JSON.stringify({ orderedIds: orderedIds }),
+                            contentType: 'application/json'
+                        });
+                    } catch (e) {
+                        console.error('Failed to save subscription order:', e);
+                        Dashboard.alert('Failed to save order');
+                    }
                 },
                 
                 clearForm() {
@@ -515,8 +668,8 @@
                     document.getElementById('subType').value = '0';
                     document.getElementById('subPattern').value = '';
                     document.getElementById('subExclude').value = '';
-                    document.getElementById('subPriority').value = document.getElementById('defaultPriority').value || '50';
                     document.getElementById('subReplays').checked = false;
+                    this._editingSortOrder = null;
                     this.onTypeChange();
                 },
                 
@@ -564,6 +717,8 @@
                     }
                 },
                 
+                _editingSortOrder: null,
+                
                 async editSubscription(id) {
                     try {
                         const sub = await ApiClient.ajax({
@@ -571,6 +726,9 @@
                             type: 'GET',
                             dataType: 'json'
                         });
+                        
+                        // Preserve sortOrder so the edit doesn't reset position
+                        this._editingSortOrder = sub.sortOrder || 0;
                         
                         document.getElementById('subscriptionFormTitle').textContent = 'Edit Subscription';
                         document.getElementById('editId').value = sub.id;
@@ -588,7 +746,6 @@
                         const pattern = sub.matchPattern || '';
                         document.getElementById('subPattern').value = (pattern === sub.name.toLowerCase()) ? '' : pattern;
                         document.getElementById('subExclude').value = (sub.excludePatterns || []).join(', ');
-                        document.getElementById('subPriority').value = sub.priority;
                         document.getElementById('subReplays').checked = sub.includeReplays;
                         
                         this.onTypeChange();
@@ -616,10 +773,14 @@
                         type: parseInt(document.getElementById('subType').value),
                         matchPattern: document.getElementById('subPattern').value || name.toLowerCase(),
                         excludePatterns: excludePatterns,
-                        priority: parseInt(document.getElementById('subPriority').value),
                         includeReplays: document.getElementById('subReplays').checked,
                         enabled: true
                     };
+                    
+                    // Preserve sortOrder when editing so position doesn't reset
+                    if (id && this._editingSortOrder != null) {
+                        data.sortOrder = this._editingSortOrder;
+                    }
                     
                     try {
                         if (id) {
@@ -722,11 +883,18 @@
                                 '<div class="listItemBody">' +
                                 '<div class="listItemBodyText"><strong>' + this.escapeHtml(alias.CanonicalName) + '</strong> = ' + alias.Aliases.map(a => this.escapeHtml(a)).join(', ') + '</div>' +
                                 '</div>' +
-                                '<button is="emby-button" type="button" class="fab mini autoSize" onclick="SportsDVR.deleteCustomAlias(\'' + this.escapeHtml(alias.CanonicalName) + '\')" title="Delete"><span class="material-icons">delete</span></button>' +
+                                '<button is="emby-button" type="button" class="fab mini autoSize btn-delete-alias" data-alias-name="' + this.escapeHtml(alias.CanonicalName) + '" title="Delete"><span class="material-icons">delete</span></button>' +
                                 '</div>';
                         });
                         html += '</div>';
                         container.innerHTML = html;
+                        
+                        // Bind delete handlers via event delegation (XSS-safe)
+                        container.querySelectorAll('.btn-delete-alias').forEach(btn => {
+                            btn.addEventListener('click', () => {
+                                SportsDVR.deleteCustomAlias(btn.dataset.aliasName);
+                            });
+                        });
                     } catch (e) {
                         console.error('Failed to load custom aliases:', e);
                         container.innerHTML = '<p class="fieldDescription" style="color: #f44336;">Failed to load aliases</p>';
@@ -889,6 +1057,125 @@
                     } finally {
                         btn.disabled = false;
                         btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_sweep</span> <span style="vertical-align: middle;">Clear Schedule Cache</span>';
+                    }
+                },
+                
+                async purgeGuideCache() {
+                    if (!confirm('This will clear Jellyfin\'s Live TV guide cache and trigger a fresh guide refresh. Use this if the guide shows yesterday\'s data or "Game Complete." Continue?')) {
+                        return;
+                    }
+
+                    const btn = document.getElementById('purgeGuideCacheBtn');
+                    const status = document.getElementById('actionStatus');
+
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">hourglass_empty</span> <span style="vertical-align: middle;">Purging...</span>';
+                    status.style.display = 'block';
+                    status.textContent = 'Purging guide cache and triggering refresh...';
+                    status.style.color = '#2196f3';
+
+                    try {
+                        var result = await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/PurgeGuideCache'),
+                            type: 'POST',
+                            dataType: 'json'
+                        });
+
+                        if (result.Success) {
+                            status.style.color = '#4caf50';
+                            status.innerHTML = '✅ ' + result.Message + ' The guide will repopulate shortly.';
+                        } else {
+                            status.style.color = '#f44336';
+                            status.innerHTML = '❌ ' + result.Message;
+                        }
+                    } catch (e) {
+                        console.error('Guide cache purge failed:', e);
+                        status.style.color = '#f44336';
+                        status.textContent = '❌ Purge failed: ' + (e.message || 'Unknown error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">cleaning_services</span> <span style="vertical-align: middle;">Purge Guide Cache</span>';
+                    }
+                },
+
+                async clearTimers() {
+                    if (!confirm('This will cancel ALL Sports DVR recording timers from Jellyfin. You can re-scan afterwards to rebuild the schedule. Continue?')) {
+                        return;
+                    }
+                    
+                    var btn = document.getElementById('clearTimersBtn');
+                    var status = document.getElementById('actionStatus');
+                    
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">hourglass_empty</span> <span style="vertical-align: middle;">Clearing...</span>';
+                    status.style.display = 'block';
+                    status.textContent = 'Cancelling Sports DVR timers...';
+                    status.style.color = '#2196f3';
+                    
+                    try {
+                        var result = await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/ClearTimers'),
+                            type: 'POST',
+                            dataType: 'json'
+                        });
+                        
+                        if (result.Success) {
+                            status.style.color = '#4caf50';
+                            status.innerHTML = '✅ ' + result.Message + '. Click "Scan EPG Now" to rebuild.';
+                        } else {
+                            status.style.color = '#f44336';
+                            status.innerHTML = '❌ ' + result.Message;
+                        }
+                        
+                        await this.loadUpcomingRecordings();
+                    } catch (e) {
+                        console.error('Clear timers failed:', e);
+                        status.style.color = '#f44336';
+                        status.textContent = '❌ Clear failed: ' + (e.message || 'Unknown error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">event_busy</span> <span style="vertical-align: middle;">Clear Recording Schedule</span>';
+                    }
+                },
+
+                async clearAllTimers() {
+                    if (!confirm('⚠️ NUCLEAR OPTION: This will cancel EVERY scheduled recording in Jellyfin — not just Sports DVR ones. Use this to clean up orphaned timers from old plugin versions.\n\nYou can re-scan afterwards to rebuild Sports DVR timers.\n\nAre you sure?')) {
+                        return;
+                    }
+                    
+                    var btn = document.getElementById('clearAllTimersBtn');
+                    var status = document.getElementById('actionStatus');
+                    
+                    btn.disabled = true;
+                    btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">hourglass_empty</span> <span style="vertical-align: middle;">Clearing ALL...</span>';
+                    status.style.display = 'block';
+                    status.textContent = 'Cancelling ALL scheduled timers...';
+                    status.style.color = '#ff9800';
+                    
+                    try {
+                        var result = await ApiClient.ajax({
+                            url: this.getApiUrl('Schedule/ClearAllTimers'),
+                            type: 'POST',
+                            dataType: 'json'
+                        });
+                        
+                        if (result.Success) {
+                            status.style.color = '#4caf50';
+                            status.innerHTML = '✅ ' + result.Message + '. Click "Scan EPG Now" to rebuild Sports DVR schedule.';
+                        } else {
+                            status.style.color = '#f44336';
+                            status.innerHTML = '❌ ' + result.Message;
+                        }
+                        
+                        await this.loadUpcomingRecordings();
+                        await this.loadStatus();
+                    } catch (e) {
+                        console.error('Clear all timers failed:', e);
+                        status.style.color = '#f44336';
+                        status.textContent = '❌ Clear all failed: ' + (e.message || 'Unknown error');
+                    } finally {
+                        btn.disabled = false;
+                        btn.innerHTML = '<span class="material-icons" style="font-size: 1em; vertical-align: middle;">delete_forever</span> <span style="vertical-align: middle;">Clear ALL Timers</span>';
                     }
                 },
                 

@@ -29,12 +29,19 @@ public class RecordingScheduler
     private readonly AliasService _aliasService;
     private readonly SubscriptionManager _subscriptionManager;
     private readonly SmartScheduler _smartScheduler;
+    private readonly GuideCachePurgeService _guideCachePurgeService;
     
     private readonly HashSet<string> _scheduledPrograms = new();
+    private readonly SemaphoreSlim _scanLock = new(1, 1);
 
-    // Default lookahead is 3 days
-    private const int DEFAULT_LOOKAHEAD_DAYS = 3;
+    // Teamarr regenerates daily; 24-hour lookahead is the right window.
+    private const int DEFAULT_LOOKAHEAD_HOURS = 24;
     private const int DEFAULT_MAX_CONCURRENT = 2;
+    
+    /// <summary>
+    /// Tracks whether the last guide cache purge has been followed by a full rebuild.
+    /// </summary>
+    private DateTime? _lastFullRebuildAfterPurge;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="RecordingScheduler"/> class.
@@ -45,7 +52,8 @@ public class RecordingScheduler
         SportsScorer sportsScorer,
         AliasService aliasService,
         SubscriptionManager subscriptionManager,
-        SmartScheduler smartScheduler)
+        SmartScheduler smartScheduler,
+        GuideCachePurgeService guideCachePurgeService)
     {
         _logger = logger;
         _liveTvManager = liveTvManager;
@@ -53,6 +61,7 @@ public class RecordingScheduler
         _aliasService = aliasService;
         _subscriptionManager = subscriptionManager;
         _smartScheduler = smartScheduler;
+        _guideCachePurgeService = guideCachePurgeService;
     }
 
     /// <summary>
@@ -81,7 +90,107 @@ public class RecordingScheduler
     }
 
     /// <summary>
+    /// Cancels all Jellyfin DVR timers that were created by Sports DVR subscriptions.
+    /// Identifies our timers by checking if the timer's program title matches any active subscription.
+    /// </summary>
+    public async Task<int> CancelSportsDvrTimersAsync(CancellationToken cancellationToken)
+    {
+        var timers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
+        var subscriptions = _subscriptionManager.GetAll();
+        var cancelledCount = 0;
+
+        foreach (var timer in timers)
+        {
+            // Check if this timer matches any of our subscriptions
+            var titleLower = timer.Name?.ToLowerInvariant() ?? string.Empty;
+            var overviewLower = timer.Overview?.ToLowerInvariant() ?? string.Empty;
+
+            var isOurs = false;
+
+            // Check by overview containing "Subscription:" (our signature in BuildRecordingDescription)
+            if (overviewLower.Contains("subscription:"))
+            {
+                isOurs = true;
+            }
+            else
+            {
+                // Fallback: check if title matches any subscription pattern
+                foreach (var sub in subscriptions)
+                {
+                    var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
+                    if (titleLower.Contains(pattern) || overviewLower.Contains(pattern))
+                    {
+                        isOurs = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isOurs)
+            {
+                try
+                {
+                    await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
+                    cancelledCount++;
+                    _logger.LogInformation("Cancelled timer: {Title} at {Time}", timer.Name, timer.StartDate.ToLocalTime().ToString("g"));
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to cancel timer '{Title}'", timer.Name);
+                }
+            }
+        }
+
+        // Clear our internal cache too
+        _scheduledPrograms.Clear();
+        _logger.LogInformation("Cancelled {Count} Sports DVR timers", cancelledCount);
+
+        return cancelledCount;
+    }
+
+    /// <summary>
+    /// Cancels ALL scheduled timers from Jellyfin's DVR — not just Sports DVR ones.
+    /// Use this as a nuclear option to clean up orphaned timers from old plugin versions.
+    /// </summary>
+    public async Task<int> CancelAllTimersAsync(CancellationToken cancellationToken)
+    {
+        var timers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
+        var cancelledCount = 0;
+        var failedCount = 0;
+
+        _logger.LogWarning("NUCLEAR: Cancelling ALL {Count} scheduled timers", timers.Count);
+
+        foreach (var timer in timers)
+        {
+            try
+            {
+                await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
+                cancelledCount++;
+                _logger.LogInformation("Cancelled timer: {Title} at {Time} (channel: {Channel})",
+                    timer.Name,
+                    timer.StartDate.ToLocalTime().ToString("g"),
+                    timer.ChannelName ?? "unknown");
+            }
+            catch (Exception ex)
+            {
+                failedCount++;
+                _logger.LogWarning(ex, "Failed to cancel timer '{Title}'", timer.Name);
+            }
+        }
+
+        // Clear our internal cache too
+        _scheduledPrograms.Clear();
+        _logger.LogInformation("NUCLEAR complete: cancelled {Cancelled}, failed {Failed} out of {Total} total timers",
+            cancelledCount, failedCount, timers.Count);
+
+        return cancelledCount;
+    }
+
+    /// <summary>
     /// Scans the EPG for programs matching subscriptions and creates an optimized schedule.
+    /// Supports two modes:
+    /// - Full scan (after guide cache purge): wipe all Sports DVR timers and rebuild from scratch.
+    /// - Confirmation scan (normal): only add new matches and remove stale timers.
     /// </summary>
     public async Task<ScanResult> ScanEpgAsync(CancellationToken cancellationToken)
     {
@@ -93,126 +202,222 @@ public class RecordingScheduler
             return result;
         }
 
-        var subscriptions = _subscriptionManager.GetEnabled();
-        if (subscriptions.Count == 0)
+        // Prevent concurrent scans (scheduled task + manual trigger could overlap)
+        if (!await _scanLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
         {
-            _logger.LogDebug("No enabled subscriptions, skipping scan");
+            _logger.LogWarning("EPG scan already in progress, skipping");
             return result;
         }
 
-        // Respect plugin setting; clamp to valid range so we never exceed tuner capacity.
-        // This must match your Jellyfin Live TV tuner "Simultaneous stream limit" (Dashboard → Live TV).
-        var maxConcurrent = config.MaxConcurrentRecordings > 0
-            ? Math.Min(Math.Max(config.MaxConcurrentRecordings, 1), 20)
-            : DEFAULT_MAX_CONCURRENT;
-
-        _logger.LogInformation(
-            "Scanning EPG for {Count} subscriptions (max {Max} concurrent recordings, {Days} day lookahead)",
-            subscriptions.Count,
-            maxConcurrent,
-            DEFAULT_LOOKAHEAD_DAYS);
-
         try
         {
-            // Step 1: Get all upcoming programs (3 day lookahead)
-            var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
-            _logger.LogInformation("Found {Count} programs in EPG", programs.Count);
-
-            if (programs.Count == 0)
+            var subscriptions = _subscriptionManager.GetEnabled();
+            if (subscriptions.Count == 0)
             {
+                _logger.LogDebug("No enabled subscriptions, skipping scan");
                 return result;
             }
 
-            // Step 2: Get existing timers to avoid duplicates
-            var existingTimers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
-            var existingProgramIds = new HashSet<string>(
-                existingTimers
-                    .Select(t => t.ProgramId)
-                    .Where(id => !string.IsNullOrEmpty(id))!);
+            // Respect plugin setting; clamp to valid range so we never exceed tuner capacity.
+            var maxConcurrent = config.MaxConcurrentRecordings > 0
+                ? Math.Min(Math.Max(config.MaxConcurrentRecordings, 1), 20)
+                : DEFAULT_MAX_CONCURRENT;
 
-            // Also build (channel + start time + name) keys so we don't re-schedule the same slot
-            // when program IDs change across EPG refreshes or when multiple scans run
-            var existingTimerKeys = new HashSet<string>(
-                existingTimers.Select(t => BuildTimerKey(t.Name, t.ChannelId.ToString(), t.StartDate)),
-                StringComparer.OrdinalIgnoreCase);
+            // Determine scan mode: full rebuild vs confirmation
+            var isFullScan = ShouldDoFullScan();
 
-            // Step 3: Find all matching programs
-            var matches = new List<MatchedProgram>();
-            var alreadyScheduledCount = 0;
-
-            foreach (var program in programs)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Score the program - include EpisodeTitle in description for raw EPG
-                // where matchup info is often in EpisodeTitle (e.g., "BYU at Oklahoma State")
-                var descWithEpisode = string.Join(" ", new[] { 
-                    program.EpisodeTitle, 
-                    program.Overview 
-                }.Where(s => !string.IsNullOrEmpty(s)));
-                
-                var scored = _sportsScorer.Score(
-                    program.Name ?? string.Empty,
-                    program.ChannelName,
-                    descWithEpisode,
-                    program.IsSports);
-
-                // Must be a likely sports event
-                if (scored.Score < SportsScorer.THRESHOLD_LIKELY_GAME)
-                {
-                    continue;
-                }
-
-                // Find matching subscription
-                var matchedSub = FindMatchingSubscription(program, scored, subscriptions);
-                if (matchedSub == null)
-                {
-                    continue;
-                }
-
-                // Check exclusion patterns
-                if (ShouldExclude(program, scored, matchedSub))
-                {
-                    _logger.LogDebug("Excluding '{Title}' - exclusion pattern or replay", program.Name);
-                    continue;
-                }
-
-                // Skip if already scheduled (by program ID, timer key, or in-memory cache)
-                var timerKey = BuildTimerKey(program.Name, program.ChannelGuid.ToString(), program.StartDate);
-                if (existingProgramIds.Contains(program.Id)
-                    || _scheduledPrograms.Contains(program.Id)
-                    || existingTimerKeys.Contains(timerKey))
-                {
-                    alreadyScheduledCount++;
-                    continue;
-                }
-
-                matches.Add(new MatchedProgram
-                {
-                    Program = program,
-                    Scored = scored,
-                    Subscription = matchedSub
-                });
-            }
-
-            var totalMatches = matches.Count + alreadyScheduledCount;
             _logger.LogInformation(
-                "Found {Total} programs matching subscriptions ({New} new, {Existing} already scheduled)",
-                totalMatches, matches.Count, alreadyScheduledCount);
+                "{Mode} EPG scan for {Count} subscriptions (max {Max} concurrent, {Hours}h lookahead)",
+                isFullScan ? "FULL REBUILD" : "CONFIRMATION",
+                subscriptions.Count,
+                maxConcurrent,
+                DEFAULT_LOOKAHEAD_HOURS);
 
-            if (matches.Count == 0)
+            if (isFullScan)
             {
-                result.MatchesFound = totalMatches;
-                result.AlreadyScheduled = alreadyScheduledCount;
-                return result;
+                result = await FullScanAsync(subscriptions, maxConcurrent, cancellationToken).ConfigureAwait(false);
+                _lastFullRebuildAfterPurge = DateTime.UtcNow;
             }
+            else
+            {
+                result = await ConfirmationScanAsync(subscriptions, maxConcurrent, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error during EPG scan");
+        }
+        finally
+        {
+            _scanLock.Release();
+        }
 
-            // Step 4: Use SmartScheduler to create optimized schedule
-            var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent);
+        return result;
+    }
 
-            // Step 5: Create timers for scheduled recordings
-            var scheduledCount = 0;
-            var alreadyExisted = 0;
+    /// <summary>
+    /// Determines whether we should do a full rebuild or a confirmation scan.
+    /// Full rebuild happens after a guide cache purge that hasn't been followed by a rebuild yet.
+    /// </summary>
+    private bool ShouldDoFullScan()
+    {
+        var lastPurge = _guideCachePurgeService.GetLastPurgeTime();
+        if (lastPurge == null)
+        {
+            return false; // No purge has happened; confirmation scan
+        }
+
+        // If we haven't done a full rebuild since the last purge, do one now
+        if (_lastFullRebuildAfterPurge == null || _lastFullRebuildAfterPurge < lastPurge)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Full scan: wipe all Sports DVR timers, rebuild schedule from scratch.
+    /// Used after a guide cache purge when we have fresh EPG data.
+    /// </summary>
+    private async Task<ScanResult> FullScanAsync(
+        IReadOnlyList<Subscription> subscriptions,
+        int maxConcurrent,
+        CancellationToken cancellationToken)
+    {
+        var result = new ScanResult();
+
+        // Step 1: Cancel all existing Sports DVR timers (clean slate)
+        var cancelled = await CancelSportsDvrTimersAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Full scan: wiped {Count} existing Sports DVR timers", cancelled);
+
+        // Step 2: Load today's EPG
+        var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Found {Count} programs in EPG ({Hours}h lookahead)", programs.Count, DEFAULT_LOOKAHEAD_HOURS);
+
+        if (programs.Count == 0)
+        {
+            return result;
+        }
+
+        // Step 3: Find all matching programs
+        var matches = FindAllMatches(programs, subscriptions, cancellationToken);
+        result.MatchesFound = matches.Count;
+
+        _logger.LogInformation("Found {Count} programs matching subscriptions", matches.Count);
+
+        if (matches.Count == 0)
+        {
+            return result;
+        }
+
+        // Step 4: Build optimized schedule
+        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent);
+
+        // Step 5: Create timers
+        var scheduledCount = 0;
+        foreach (var recording in schedule)
+        {
+            try
+            {
+                await ScheduleRecordingAsync(recording, cancellationToken).ConfigureAwait(false);
+                scheduledCount++;
+                _scheduledPrograms.Add(recording.Program.Id);
+
+                var backupInfo = recording.HasBackupChannels ? " (backup channels available)" : "";
+                _logger.LogInformation(
+                    "Scheduled: {Title} at {Time} on {Channel} (priority {Pri}){Backup}",
+                    recording.Title,
+                    recording.StartTime.ToLocalTime().ToString("g"),
+                    recording.ChannelName,
+                    recording.Priority,
+                    backupInfo);
+            }
+            catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+            {
+                // Shouldn't happen after a wipe, but handle gracefully
+                _scheduledPrograms.Add(recording.Program.Id);
+                _logger.LogDebug("Timer already exists for '{Title}' - skipping", recording.Title);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to schedule recording for '{Title}'", recording.Title);
+            }
+        }
+
+        result.NewRecordings = scheduledCount;
+
+        _logger.LogInformation(
+            "FULL SCAN complete: {Matches} matches, {Scheduled} recordings created (wiped {Cancelled} old timers)",
+            matches.Count,
+            scheduledCount,
+            cancelled);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Confirmation scan: compare current EPG matches against existing timers.
+    /// Adds new matches and removes stale timers.
+    /// </summary>
+    private async Task<ScanResult> ConfirmationScanAsync(
+        IReadOnlyList<Subscription> subscriptions,
+        int maxConcurrent,
+        CancellationToken cancellationToken)
+    {
+        var result = new ScanResult();
+
+        // Step 1: Load EPG and existing timers
+        var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Found {Count} programs in EPG ({Hours}h lookahead)", programs.Count, DEFAULT_LOOKAHEAD_HOURS);
+
+        if (programs.Count == 0)
+        {
+            return result;
+        }
+
+        var existingTimers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
+        var existingProgramIds = new HashSet<string>(
+            existingTimers
+                .Select(t => t.ProgramId)
+                .Where(id => !string.IsNullOrEmpty(id))!);
+        var existingTimerKeys = new HashSet<string>(
+            existingTimers.Select(t => BuildTimerKey(t.Name, t.ChannelId.ToString(), t.StartDate)),
+            StringComparer.OrdinalIgnoreCase);
+
+        // Step 2: Find all matching programs
+        var allMatches = FindAllMatches(programs, subscriptions, cancellationToken);
+        result.MatchesFound = allMatches.Count;
+
+        // Step 3: Separate into new vs already-scheduled
+        var newMatches = new List<MatchedProgram>();
+        var alreadyScheduledCount = 0;
+
+        foreach (var match in allMatches)
+        {
+            var timerKey = BuildTimerKey(match.Program.Name, match.Program.ChannelGuid.ToString(), match.Program.StartDate);
+            if (existingProgramIds.Contains(match.Program.Id)
+                || _scheduledPrograms.Contains(match.Program.Id)
+                || existingTimerKeys.Contains(timerKey))
+            {
+                alreadyScheduledCount++;
+            }
+            else
+            {
+                newMatches.Add(match);
+            }
+        }
+
+        _logger.LogInformation(
+            "Confirmation scan: {Total} matches ({New} new, {Existing} already scheduled)",
+            allMatches.Count, newMatches.Count, alreadyScheduledCount);
+
+        // Step 4: Schedule new matches if slots available
+        var scheduledCount = 0;
+        var alreadyExisted = 0;
+        if (newMatches.Count > 0)
+        {
+            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent);
             foreach (var recording in schedule)
             {
                 try
@@ -221,52 +426,134 @@ public class RecordingScheduler
                     scheduledCount++;
                     _scheduledPrograms.Add(recording.Program.Id);
 
-                    var backupInfo = recording.HasBackupChannels ? " (backup channels available)" : "";
                     _logger.LogInformation(
-                        "✅ Scheduled: {Title} at {Time} on {Channel} (priority {Pri}){Backup}",
+                        "Scheduled (new): {Title} at {Time} on {Channel}",
                         recording.Title,
                         recording.StartTime.ToLocalTime().ToString("g"),
-                        recording.ChannelName,
-                        recording.Priority,
-                        backupInfo);
+                        recording.ChannelName);
                 }
                 catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Timer already exists in Jellyfin - this is fine, just track it
                     alreadyExisted++;
                     _scheduledPrograms.Add(recording.Program.Id);
-                    _logger.LogDebug(
-                        "Timer already exists for '{Title}' - skipping (already scheduled)",
-                        recording.Title);
                 }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Failed to schedule recording for '{Title}'", recording.Title);
                 }
             }
-
-            result.MatchesFound = totalMatches;
-            result.NewRecordings = scheduledCount;
-            result.AlreadyScheduled = alreadyScheduledCount + alreadyExisted;
-
-            _logger.LogInformation(
-                "📺 EPG scan complete: {Matches} matches → {Scheduled} new recordings, {Existed} already scheduled",
-                matches.Count,
-                scheduledCount,
-                alreadyExisted);
         }
-        catch (Exception ex)
+
+        // Step 5: Check for stale timers (programs removed from EPG)
+        var removedCount = 0;
+        var now = DateTime.UtcNow;
+        var matchedProgramKeys = new HashSet<string>(
+            allMatches.Select(m => BuildTimerKey(m.Program.Name, m.Program.ChannelGuid.ToString(), m.Program.StartDate)),
+            StringComparer.OrdinalIgnoreCase);
+
+        // Build a set of program IDs currently in the EPG (not from timers)
+        // so we can detect when a timer's program has been removed from the guide
+        var currentEpgProgramIds = new HashSet<string>(
+            programs.Select(p => p.Id).Where(id => !string.IsNullOrEmpty(id)));
+
+        foreach (var timer in existingTimers)
         {
-            _logger.LogError(ex, "Error during EPG scan");
+            // Only check future timers that we created (identified by "Subscription:" in overview)
+            if (timer.StartDate < now) continue;
+            var overview = timer.Overview?.ToLowerInvariant() ?? string.Empty;
+            if (!overview.Contains("subscription:")) continue;
+
+            var timerKey = BuildTimerKey(timer.Name, timer.ChannelId.ToString(), timer.StartDate);
+            if (!matchedProgramKeys.Contains(timerKey) && !currentEpgProgramIds.Contains(timer.ProgramId ?? string.Empty))
+            {
+                // This timer no longer matches any EPG program - may have been removed
+                _logger.LogWarning(
+                    "Stale timer detected: '{Title}' at {Time} - program no longer in EPG, cancelling",
+                    timer.Name,
+                    timer.StartDate.ToLocalTime().ToString("g"));
+
+                try
+                {
+                    await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
+                    removedCount++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to cancel stale timer '{Title}'", timer.Name);
+                }
+            }
         }
+
+        result.NewRecordings = scheduledCount;
+        result.AlreadyScheduled = alreadyScheduledCount + alreadyExisted;
+
+        _logger.LogInformation(
+            "CONFIRMATION scan complete: {New} additions, {Removed} removals, {Existing} confirmed",
+            scheduledCount,
+            removedCount,
+            alreadyScheduledCount);
 
         return result;
+    }
+
+    /// <summary>
+    /// Finds all programs matching subscriptions (scoring, matching, filtering).
+    /// </summary>
+    private List<MatchedProgram> FindAllMatches(
+        List<ProgramInfo> programs,
+        IReadOnlyList<Subscription> subscriptions,
+        CancellationToken cancellationToken)
+    {
+        var matches = new List<MatchedProgram>();
+
+        foreach (var program in programs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Score the program - include EpisodeTitle in description for raw EPG
+            var descWithEpisode = string.Join(" ", new[] { 
+                program.EpisodeTitle, 
+                program.Overview 
+            }.Where(s => !string.IsNullOrEmpty(s)));
+            
+            var scored = _sportsScorer.Score(
+                program.Name ?? string.Empty,
+                program.ChannelName,
+                descWithEpisode,
+                program.IsSports);
+
+            if (scored.Score < SportsScorer.THRESHOLD_LIKELY_GAME)
+            {
+                continue;
+            }
+
+            var matchedSub = FindMatchingSubscription(program, scored, subscriptions);
+            if (matchedSub == null)
+            {
+                continue;
+            }
+
+            if (ShouldExclude(program, scored, matchedSub))
+            {
+                _logger.LogDebug("Excluding '{Title}' - exclusion pattern or replay", program.Name);
+                continue;
+            }
+
+            matches.Add(new MatchedProgram
+            {
+                Program = program,
+                Scored = scored,
+                Subscription = matchedSub
+            });
+        }
+
+        return matches;
     }
 
     private async Task<List<ProgramInfo>> GetUpcomingProgramsAsync(CancellationToken cancellationToken)
     {
         var result = new List<ProgramInfo>();
-        var endDate = DateTime.UtcNow.AddDays(DEFAULT_LOOKAHEAD_DAYS);
+        var endDate = DateTime.UtcNow.AddHours(DEFAULT_LOOKAHEAD_HOURS);
 
         try
         {
@@ -361,7 +648,7 @@ public class RecordingScheduler
         // Include episode title and channel name for teamarr events which store league/matchup info there
         var combinedText = $"{title} {description} {episodeTitle} {channelName}";
 
-        foreach (var sub in subscriptions.OrderByDescending(s => s.Priority))
+        foreach (var sub in subscriptions.OrderBy(s => s.SortOrder))
         {
             var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
             bool isMatch = false;
@@ -549,7 +836,8 @@ public class RecordingScheduler
             return true;
         }
 
-        // Exclude Teamarr pre-game/post-game filler (record the actual game, not the placeholder)
+        // Teamarr filler: "Game Starting at X:XX PM EST" = placeholder before the real game entry
+        // "Game Complete" = finished game. Both are not the actual game broadcast.
         if (Regex.IsMatch(titleLower, @"\bgame\s+starting\s+at\b") ||
             Regex.IsMatch(titleLower, @"\bgame\s+complete\b"))
         {
@@ -632,7 +920,7 @@ public class RecordingScheduler
         // "Premier League", "NBA Basketball", etc. alone are not specific enough
         // But don't exclude if it's a teamarr event with specific matchup info
         var baseTitle = title.ToLower();  // Just the original title for this check
-        if (Regex.IsMatch(baseTitle, @"^(premier league|nba|nfl|nhl|mlb|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football)?$", RegexOptions.IgnoreCase))
+        if (Regex.IsMatch(baseTitle, @"^(premier league|nba|nfl|nhl|mlb|ncaa|college|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football|\s+hockey)?$", RegexOptions.IgnoreCase))
         {
             return false;
         }
@@ -747,7 +1035,8 @@ public class RecordingScheduler
             IsPrePaddingRequired = defaults.IsPrePaddingRequired,
             IsPostPaddingRequired = true, // Sports often run over
             
-            Priority = subscription.Priority
+            // Map SortOrder (0=highest) to Jellyfin priority (higher number = higher priority)
+            Priority = Math.Max(1, 100 - subscription.SortOrder)
         };
 
         // Create the timer via Jellyfin's Live TV manager
@@ -772,7 +1061,7 @@ public class RecordingScheduler
         }
         
         parts.Add($"Subscription: {subscription.Name} ({subscription.Type})");
-        parts.Add($"Priority: {recording.Priority}");
+        parts.Add($"Priority: #{subscription.SortOrder + 1}");
 
         if (recording.HasBackupChannels)
         {
@@ -861,14 +1150,22 @@ public class RecordingScheduler
         var aliases = new List<string> { pattern };
         var patternLower = pattern.ToLowerInvariant();
         
-        // NCAA / College equivalence
+        // NCAA / College equivalence + gendered variants (NCAAM, NCAAW)
         if (patternLower.Contains("ncaa"))
         {
             aliases.Add(patternLower.Replace("ncaa", "college"));
+            aliases.Add("ncaam");   // NCAA Men's
+            aliases.Add("ncaaw");   // NCAA Women's
+            aliases.Add("ncaa basketball");
+            aliases.Add("ncaa football");
+            aliases.Add("college basketball");
+            aliases.Add("college football");
         }
         else if (patternLower.Contains("college"))
         {
             aliases.Add(patternLower.Replace("college", "ncaa"));
+            aliases.Add("ncaam");
+            aliases.Add("ncaaw");
         }
         
         // NBA equivalence

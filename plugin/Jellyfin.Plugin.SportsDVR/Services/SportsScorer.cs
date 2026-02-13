@@ -146,7 +146,7 @@ public class SportsScorer
         ["NFL"] = new[] { "nfl", "nfl football" },
         ["NHL"] = new[] { "nhl", "nhl hockey" },
         ["MLB"] = new[] { "mlb", "mlb baseball" },
-        ["NCAA"] = new[] { "ncaa", "college basketball", "college football", "college hockey", "march madness" },
+        ["NCAA"] = new[] { "ncaa", "ncaam", "ncaaw", "college basketball", "college football", "college hockey", "march madness" },
         ["EPL"] = new[] { "epl", "premier league", "english premier league" },
         ["LaLiga"] = new[] { "la liga", "spanish la liga" },
         ["Bundesliga"] = new[] { "bundesliga", "german bundesliga" },

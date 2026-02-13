@@ -62,10 +62,11 @@ public class Subscription
     public string[] ExcludePatterns { get; set; } = Array.Empty<string>();
 
     /// <summary>
-    /// Gets or sets the priority (1-100). Higher wins conflicts.
+    /// Gets or sets the sort order (0-based position in the subscription list).
+    /// Lower number = higher priority. Position 0 is most important.
     /// </summary>
-    [JsonPropertyName("priority")]
-    public int Priority { get; set; } = 50;
+    [JsonPropertyName("sortOrder")]
+    public int SortOrder { get; set; }
 
     /// <summary>
     /// Gets or sets whether to include replays/encores.

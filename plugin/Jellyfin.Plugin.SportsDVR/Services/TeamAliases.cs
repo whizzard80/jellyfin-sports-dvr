@@ -235,13 +235,14 @@ public static class TeamAliases
         {
             foreach (var customAlias in config.CustomAliases)
             {
+                var customAliases = customAlias.Aliases ?? Array.Empty<string>();
                 if (customAlias.CanonicalName.Equals(teamName, StringComparison.OrdinalIgnoreCase) ||
                     customAlias.CanonicalName.Equals(normalized, StringComparison.OrdinalIgnoreCase) ||
-                    customAlias.Aliases.Contains(teamName, StringComparer.OrdinalIgnoreCase) ||
-                    customAlias.Aliases.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+                    customAliases.Contains(teamName, StringComparer.OrdinalIgnoreCase) ||
+                    customAliases.Contains(normalized, StringComparer.OrdinalIgnoreCase))
                 {
                     aliases.Add(customAlias.CanonicalName);
-                    foreach (var alias in customAlias.Aliases)
+                    foreach (var alias in customAliases)
                     {
                         aliases.Add(alias);
                     }
@@ -331,8 +332,9 @@ public static class TeamAliases
         {
             foreach (var customAlias in config.CustomAliases)
             {
-                if (customAlias.Aliases.Contains(teamName, StringComparer.OrdinalIgnoreCase) ||
-                    customAlias.Aliases.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+                var customAliases = customAlias.Aliases ?? Array.Empty<string>();
+                if (customAliases.Contains(teamName, StringComparer.OrdinalIgnoreCase) ||
+                    customAliases.Contains(normalized, StringComparer.OrdinalIgnoreCase))
                 {
                     return customAlias.CanonicalName;
                 }

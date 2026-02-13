@@ -17,16 +17,19 @@ public class EpgScanTask : IScheduledTask
 {
     private readonly ILogger<EpgScanTask> _logger;
     private readonly RecordingScheduler _recordingScheduler;
+    private readonly GuideCachePurgeService _guideCachePurgeService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="EpgScanTask"/> class.
     /// </summary>
     public EpgScanTask(
         ILogger<EpgScanTask> logger,
-        RecordingScheduler recordingScheduler)
+        RecordingScheduler recordingScheduler,
+        GuideCachePurgeService guideCachePurgeService)
     {
         _logger = logger;
         _recordingScheduler = recordingScheduler;
+        _guideCachePurgeService = guideCachePurgeService;
     }
 
     /// <inheritdoc />
@@ -69,6 +72,7 @@ public class EpgScanTask : IScheduledTask
 
         try
         {
+            _guideCachePurgeService.PurgeIfNeeded();
             progress.Report(10);
             var result = await _recordingScheduler.ScanEpgAsync(cancellationToken).ConfigureAwait(false);
             progress.Report(100);

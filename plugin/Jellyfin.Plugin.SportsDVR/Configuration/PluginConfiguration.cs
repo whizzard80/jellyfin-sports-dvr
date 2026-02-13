@@ -16,7 +16,6 @@ public class PluginConfiguration : BasePluginConfiguration
     public PluginConfiguration()
     {
         MaxConcurrentRecordings = 2;
-        DefaultPriority = 50;
         Subscriptions = new List<Subscription>();
         CustomAliases = new List<CustomTeamAlias>();
         EnableAutoScheduling = true;
@@ -30,11 +29,6 @@ public class PluginConfiguration : BasePluginConfiguration
     /// schedule more recordings at once than the tuner allows. Capped at 1-20 in the scheduler.
     /// </summary>
     public int MaxConcurrentRecordings { get; set; }
-
-    /// <summary>
-    /// Gets or sets the default priority for new subscriptions (1-100).
-    /// </summary>
-    public int DefaultPriority { get; set; }
 
     /// <summary>
     /// Gets or sets whether auto-scheduling from EPG is enabled.
@@ -69,6 +63,20 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Default: "USA"
     /// </summary>
     public string PrimaryRegion { get; set; } = "USA";
+
+    /// <summary>
+    /// Gets or sets whether to purge Jellyfin's Live TV guide cache once per day.
+    /// When enabled, the plugin clears xmltv and *_channels cache so "Refresh Guide Data" loads fresh EPG
+    /// (fixes stale "Game Complete" entries). Runs at most once every 24 hours during the hour set by GuideCachePurgeHour.
+    /// </summary>
+    public bool EnableDailyGuideCachePurge { get; set; } = true;
+
+    /// <summary>
+    /// Hour of day (0-23, server local time) when the guide cache purge is allowed to run.
+    /// The purge runs when the EPG scan task runs during this hour (and at least 24h since last purge).
+    /// Default 4 = 4 AM.
+    /// </summary>
+    public int GuideCachePurgeHour { get; set; } = 4;
 }
 
 /// <summary>
@@ -84,8 +92,8 @@ public static class RegionTimeWindows
     {
         return region?.ToUpperInvariant() switch
         {
-            // USA: 12 PM - 12 AM EST = 17:00 - 05:00 UTC
-            "USA" => (17, 5, 11, 21),  // Euro football: 6 AM - 4 PM EST = 11:00 - 21:00 UTC
+            // USA: 10 AM - 1 AM EST = 15:00 - 06:00 UTC (covers NCAA daytime games + late West Coast)
+            "USA" => (15, 6, 11, 21),  // Euro football: 6 AM - 4 PM EST = 11:00 - 21:00 UTC
             
             // Europe: 2 PM - 11 PM CET = 13:00 - 22:00 UTC (local prime time)
             "EUROPE" => (13, 22, 13, 22),  // Euro football same window

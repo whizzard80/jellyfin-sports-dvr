@@ -10,7 +10,8 @@ namespace Jellyfin.Plugin.SportsDVR;
 
 /// <summary>
 /// Sports DVR Plugin for Jellyfin.
-/// Provides DVR recording, time-shifting, and a dedicated Sports home section.
+/// Automatically records sports by scanning the EPG and scheduling recordings
+/// based on team, league, or event subscriptions with smart conflict resolution.
 /// </summary>
 public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
@@ -32,7 +33,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public override Guid Id => Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
 
     /// <inheritdoc />
-    public override string Description => "DVR recording and time-shifting for sports with a dedicated home section.";
+    public override string Description => "Automatically record sports by subscribing to teams, leagues, or events. Scans the EPG, deduplicates games, and schedules recordings with smart priority and concurrency management.";
 
     /// <summary>
     /// Gets the current plugin instance.

@@ -34,6 +34,7 @@ public class SportsController : ControllerBase
     private readonly ILiveTvManager _liveTvManager;
     private readonly SportsScorer _sportsScorer;
     private readonly RecordingScheduler _recordingScheduler;
+    private readonly GuideCachePurgeService _guideCachePurgeService;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="SportsController"/> class.
@@ -45,7 +46,8 @@ public class SportsController : ControllerBase
         PatternMatcher patternMatcher,
         ILiveTvManager liveTvManager,
         SportsScorer sportsScorer,
-        RecordingScheduler recordingScheduler)
+        RecordingScheduler recordingScheduler,
+        GuideCachePurgeService guideCachePurgeService)
     {
         _logger = logger;
         _subscriptionManager = subscriptionManager;
@@ -54,6 +56,7 @@ public class SportsController : ControllerBase
         _liveTvManager = liveTvManager;
         _sportsScorer = sportsScorer;
         _recordingScheduler = recordingScheduler;
+        _guideCachePurgeService = guideCachePurgeService;
     }
 
     // ==================== SUBSCRIPTIONS ====================
@@ -97,13 +100,17 @@ public class SportsController : ControllerBase
             return BadRequest("Name is required");
         }
 
+        // New subscriptions go to the end of the list (lowest priority)
+        var existingSubs = Plugin.Instance?.Configuration.Subscriptions;
+        var nextSortOrder = existingSubs?.Count ?? 0;
+
         var subscription = new Subscription
         {
             Name = request.Name,
             Type = request.Type,
             MatchPattern = request.MatchPattern ?? request.Name.ToLowerInvariant(),
             ExcludePatterns = request.ExcludePatterns ?? Array.Empty<string>(),
-            Priority = request.Priority ?? Plugin.Instance?.Configuration.DefaultPriority ?? 50,
+            SortOrder = nextSortOrder,
             IncludeReplays = request.IncludeReplays,
             Enabled = true
         };
@@ -159,6 +166,48 @@ public class SportsController : ControllerBase
             return NotFound();
         }
         return Ok();
+    }
+
+    /// <summary>
+    /// Reorders subscriptions by setting SortOrder based on the submitted list order.
+    /// The first ID in the array gets SortOrder 0 (highest priority), etc.
+    /// </summary>
+    [HttpPost("Subscriptions/Reorder")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public ActionResult ReorderSubscriptions([FromBody] ReorderRequest request)
+    {
+        if (request.OrderedIds == null || request.OrderedIds.Length == 0)
+        {
+            return BadRequest("OrderedIds is required");
+        }
+
+        var config = Plugin.Instance?.Configuration;
+        if (config == null)
+        {
+            return StatusCode(500, "Plugin not initialized");
+        }
+
+        // Build a lookup from ID to new sort order
+        var orderMap = new Dictionary<string, int>();
+        for (int i = 0; i < request.OrderedIds.Length; i++)
+        {
+            orderMap[request.OrderedIds[i]] = i;
+        }
+
+        // Update SortOrder for each subscription
+        foreach (var sub in config.Subscriptions)
+        {
+            if (orderMap.TryGetValue(sub.Id, out var newOrder))
+            {
+                sub.SortOrder = newOrder;
+            }
+        }
+
+        Plugin.Instance!.SaveConfiguration();
+        _logger.LogInformation("Reordered {Count} subscriptions", request.OrderedIds.Length);
+
+        return Ok(new { Success = true, Message = $"Reordered {request.OrderedIds.Length} subscriptions" });
     }
 
     // ==================== PROGRAM PARSING ====================
@@ -268,7 +317,7 @@ public class SportsController : ControllerBase
                     ChannelName = timer.ChannelName ?? "Unknown",
                     StartTime = timer.StartDate,
                     EndTime = timer.EndDate,
-                    Priority = timer.Priority,
+                    Priority = timer.Priority, // Jellyfin timer priority (higher = more important)
                     HasBackupChannels = false, // Could be enhanced to track this
                     IsSkipped = false
                 };
@@ -331,7 +380,7 @@ public class SportsController : ControllerBase
         var subscriptions = _subscriptionManager.GetAll().Where(s => s.Enabled).ToList();
         var titleLower = title.ToLowerInvariant();
 
-        foreach (var sub in subscriptions.OrderByDescending(s => s.Priority))
+        foreach (var sub in subscriptions.OrderBy(s => s.SortOrder))
         {
             var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
             if (titleLower.Contains(pattern))
@@ -390,6 +439,70 @@ public class SportsController : ControllerBase
     }
 
     /// <summary>
+    /// Cancels all Sports DVR timers from Jellyfin's DVR schedule.
+    /// This only removes timers that were created by SportsDVR subscriptions.
+    /// </summary>
+    [HttpPost("Schedule/ClearTimers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult> ClearTimers()
+    {
+        _logger.LogInformation("Clear timers triggered via API");
+
+        try
+        {
+            var cancelled = await _recordingScheduler.CancelSportsDvrTimersAsync(CancellationToken.None).ConfigureAwait(false);
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Cancelled {cancelled} Sports DVR timer(s)",
+                CancelledCount = cancelled
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clear timers");
+            return Ok(new
+            {
+                Success = false,
+                Message = $"Failed: {ex.Message}",
+                CancelledCount = 0
+            });
+        }
+    }
+
+    /// <summary>
+    /// Cancels ALL scheduled timers from Jellyfin's DVR — every single one, not just Sports DVR.
+    /// Use this as a nuclear option to clean up orphaned timers from old plugin versions.
+    /// </summary>
+    [HttpPost("Schedule/ClearAllTimers")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult> ClearAllTimers()
+    {
+        _logger.LogWarning("NUCLEAR clear ALL timers triggered via API");
+
+        try
+        {
+            var cancelled = await _recordingScheduler.CancelAllTimersAsync(CancellationToken.None).ConfigureAwait(false);
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Cancelled ALL {cancelled} timer(s) from Jellyfin DVR",
+                CancelledCount = cancelled
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clear all timers");
+            return Ok(new
+            {
+                Success = false,
+                Message = $"Failed: {ex.Message}",
+                CancelledCount = 0
+            });
+        }
+    }
+
+    /// <summary>
     /// Clears the plugin's internal schedule tracking cache.
     /// Use after changing tuner or EPG source.
     /// </summary>
@@ -417,6 +530,41 @@ public class SportsController : ControllerBase
             {
                 Success = false,
                 Message = $"Clear failed: {ex.Message}"
+            });
+        }
+    }
+
+    /// <summary>
+    /// Purges Jellyfin's Live TV guide cache and triggers a guide refresh.
+    /// Clears stale EPG data so the guide loads fresh programs (fixes "Game Complete" entries).
+    /// </summary>
+    [HttpPost("Schedule/PurgeGuideCache")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult PurgeGuideCache()
+    {
+        _logger.LogInformation("Manual guide cache purge triggered via API");
+
+        try
+        {
+            var result = _guideCachePurgeService.PurgeNow();
+            return Ok(new
+            {
+                result.Success,
+                result.Message,
+                result.FilesDeleted,
+                result.DirsDeleted,
+                LastPurge = _guideCachePurgeService.GetLastPurgeTime()?.ToString("o")
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Guide cache purge failed");
+            return Ok(new
+            {
+                Success = false,
+                Message = $"Purge failed: {ex.Message}",
+                FilesDeleted = 0,
+                DirsDeleted = 0
             });
         }
     }
@@ -802,6 +950,18 @@ public class SportsController : ControllerBase
 // ==================== REQUEST/RESPONSE MODELS ====================
 
 /// <summary>
+/// Request to reorder subscriptions.
+/// </summary>
+public class ReorderRequest
+{
+    /// <summary>
+    /// Gets or sets the ordered subscription IDs. Index 0 = highest priority.
+    /// </summary>
+    [Required]
+    public string[] OrderedIds { get; set; } = Array.Empty<string>();
+}
+
+/// <summary>
 /// Request to create a subscription.
 /// </summary>
 public class CreateSubscriptionRequest
@@ -826,11 +986,6 @@ public class CreateSubscriptionRequest
     /// Gets or sets exclusion patterns.
     /// </summary>
     public string[]? ExcludePatterns { get; set; }
-
-    /// <summary>
-    /// Gets or sets the priority.
-    /// </summary>
-    public int? Priority { get; set; }
 
     /// <summary>
     /// Gets or sets whether to include replays.

@@ -21,6 +21,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         services.AddSingleton<AliasService>();
         services.AddSingleton<SubscriptionManager>();
         services.AddSingleton<SmartScheduler>();
+        services.AddSingleton<GuideCachePurgeService>();
 
         // Recording scheduler (singleton, called by the scheduled task)
         services.AddSingleton<RecordingScheduler>();

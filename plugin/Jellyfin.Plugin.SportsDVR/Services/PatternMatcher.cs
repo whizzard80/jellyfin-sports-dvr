@@ -180,7 +180,7 @@ public class PatternMatcher
 
     private bool MatchesExclusions(ParsedProgram program, Subscription subscription)
     {
-        if (subscription.ExcludePatterns.Length == 0)
+        if (subscription.ExcludePatterns == null || subscription.ExcludePatterns.Length == 0)
         {
             return false;
         }

@@ -52,6 +52,59 @@ IPTV Provider → Dispatcharr → Teamarr → Dispatcharr EPG Output → Jellyfi
 
 **Prerequisites:** Dispatcharr and Teamarr must be set up and feeding EPG data into Jellyfin's Live TV before the plugin will find matches.
 
+### Guide must refresh daily
+
+This plugin **only reads** the guide—it does not fetch or update EPG data. If you see yesterday's data (e.g. everything showing "Game Complete"), the guide in Jellyfin is stale.
+
+- **Refresh the guide** at least daily so Jellyfin has today's programs. In **Dashboard → Live TV**, use your tuner's option to refresh/reload the guide (or ensure the EPG URL is fetched on a schedule).
+- **Dispatcharr** should regenerate the M3U/EPG (e.g. from Teamarr) on a schedule (e.g. daily or every few hours). Point Jellyfin's Live TV at Dispatcharr's EPG URL so each refresh pulls fresh data.
+- Until the guide is updated, the plugin will only see old entries and may schedule nothing or the wrong slots.
+
+### Guide still shows "Game Complete" after refreshing
+
+Jellyfin has a [known bug](https://github.com/jellyfin/jellyfin/issues/6103): **"Refresh Guide Data" often does not clear the EPG cache**, so the UI keeps showing old program data even after you refresh in both Dispatcharr and Jellyfin.
+
+**Workaround — manually clear Jellyfin's guide cache**, then run "Refresh Guide Data" again:
+
+1. **Stop Jellyfin** (so nothing is using the cache).
+2. Delete the Live TV cache directories (paths are under Jellyfin's **cache** directory):
+   - `cache/xmltv/*` (all files inside the `xmltv` folder)
+   - `cache/*_channels` (any folder whose name ends with `_channels`)
+3. **Start Jellyfin**, then go to **Dashboard → Live TV** and run **Refresh Guide Data** for your tuner.
+
+**Where is the cache directory?**
+
+| Setup | Typical cache path |
+|-------|---------------------|
+| **Linux** (native) | `~/.cache/jellyfin` or `$XDG_CACHE_HOME/jellyfin` |
+| **Docker** | Often `/config/cache` (if `/config` is your data volume) |
+| **Windows** | Under Jellyfin data directory, e.g. `%APPDATA%\Jellyfin\cache` |
+
+Example (Linux native):
+
+```bash
+# Stop Jellyfin first, then:
+rm -rf ~/.cache/jellyfin/xmltv/*
+rm -rf ~/.cache/jellyfin/*_channels
+# Start Jellyfin, then in the UI: Live TV → Refresh Guide Data
+```
+
+Example (Docker, with `/config` as data volume):
+
+```bash
+docker stop jellyfin
+rm -rf /path/to/config/cache/xmltv/*
+rm -rf /path/to/config/cache/*_channels
+docker start jellyfin
+# Then in the UI: Live TV → Refresh Guide Data
+```
+
+After that, the guide should load fresh data from Dispatcharr and "Game Complete" placeholders should be replaced with today's programs.
+
+**Built-in (recommended):** The plugin can purge the guide cache for you so you start each day with a clean slate. In **Dashboard → Plugins → Sports DVR**, enable **"Purge Live TV guide cache daily"** and set **"Cache purge at"** to the hour you want (e.g. 4 AM, server local time). The purge runs at most once every 24 hours when the "Scan EPG for Sports" task runs during that hour. After the purge, run **"Refresh Guide Data"** in Dashboard → Live TV (or schedule Jellyfin's own "Refresh Guide Data" task to run shortly after).
+
+**Optional script/cron:** If you prefer to purge outside the plugin, see [scripts/README.md](scripts/README.md).
+
 ## How It Works
 
 ```
