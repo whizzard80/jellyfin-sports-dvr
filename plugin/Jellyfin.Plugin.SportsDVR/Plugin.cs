@@ -33,7 +33,7 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public override Guid Id => Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
 
     /// <inheritdoc />
-    public override string Description => "Automatically record sports by subscribing to teams, leagues, or events. Scans the EPG, deduplicates games, and schedules recordings with smart priority and concurrency management.";
+    public override string Description => "Automatic sports DVR — subscribe to teams, leagues, or events and let the plugin handle scheduling. Requires Teamarr-enriched EPG.";
 
     /// <summary>
     /// Gets the current plugin instance.

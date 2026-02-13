@@ -255,7 +255,7 @@ Output: `bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll`
 
 ## Requirements
 
-- Jellyfin 10.9+
+- Jellyfin 10.11+
 - Live TV configured with Teamarr-enriched EPG data
 - [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) for IPTV channel management
 - [Teamarr](https://github.com/Pharaoh-Labs/teamarr) for sports event matching and `<live>` tagging

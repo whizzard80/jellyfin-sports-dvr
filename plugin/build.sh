@@ -27,24 +27,24 @@ mkdir -p "$OUTPUT_DIR"
 
 # Copy plugin files
 echo "Packaging plugin..."
-cp bin/Release/net8.0/Jellyfin.Plugin.SportsDVR.dll "$OUTPUT_DIR/"
+cp bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll "$OUTPUT_DIR/"
 
 # Create meta.json for the plugin
 cat > "$OUTPUT_DIR/meta.json" << 'EOF'
 {
     "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "name": "Sports DVR",
-    "description": "DVR recording and time-shifting for sports with a dedicated home section",
-    "overview": "Record sports games, watch live games from the beginning, and manage recordings in a dedicated Sports for You section.",
+    "description": "Automatic sports DVR — subscribe to teams, leagues, or events and let the plugin handle scheduling. Requires Teamarr-enriched EPG.",
+    "overview": "Scans your Teamarr + Dispatcharr EPG for live sports, deduplicates games, and schedules recordings with smart priority and concurrency management. Requires a Teamarr-enriched EPG for accurate matching.",
     "owner": "whizzard80",
     "category": "Live TV",
     "versions": [
         {
-            "version": "1.0.0.0",
-            "changelog": "Initial release",
-            "targetAbi": "10.9.0.0",
+            "version": "1.1.0.0",
+            "changelog": "Smart scheduling with concurrency limits, game deduplication, EPG scan task, guide cache purge, drag-to-reorder subscriptions, nuclear timer clear, plugin branding",
+            "targetAbi": "10.11.0.0",
             "sourceUrl": "https://github.com/whizzard80/jellyfin-sports-dvr/releases",
-            "timestamp": "2026-02-02T00:00:00Z"
+            "timestamp": "2026-02-08T00:00:00Z"
         }
     ]
 }
