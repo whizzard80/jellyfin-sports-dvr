@@ -31,7 +31,6 @@ public class RecordingScheduler
     private readonly SmartScheduler _smartScheduler;
     private readonly GuideCachePurgeService _guideCachePurgeService;
     
-    private readonly HashSet<string> _scheduledPrograms = new();
     private readonly SemaphoreSlim _scanLock = new(1, 1);
 
     // Teamarr regenerates daily; 24-hour lookahead is the right window.
@@ -70,8 +69,7 @@ public class RecordingScheduler
     /// </summary>
     public void ClearScheduledProgramsCache()
     {
-        _logger.LogInformation("Clearing scheduled programs cache ({Count} entries)", _scheduledPrograms.Count);
-        _scheduledPrograms.Clear();
+        _logger.LogInformation("Clearing scheduled programs cache");
     }
 
     /// <summary>
@@ -141,8 +139,6 @@ public class RecordingScheduler
             }
         }
 
-        // Clear our internal cache too
-        _scheduledPrograms.Clear();
         _logger.LogInformation("Cancelled {Count} Sports DVR timers", cancelledCount);
 
         return cancelledCount;
@@ -178,8 +174,6 @@ public class RecordingScheduler
             }
         }
 
-        // Clear our internal cache too
-        _scheduledPrograms.Clear();
         _logger.LogInformation("NUCLEAR complete: cancelled {Cancelled}, failed {Failed} out of {Total} total timers",
             cancelledCount, failedCount, timers.Count);
 
@@ -322,7 +316,6 @@ public class RecordingScheduler
             {
                 await ScheduleRecordingAsync(recording, cancellationToken).ConfigureAwait(false);
                 scheduledCount++;
-                _scheduledPrograms.Add(recording.Program.Id);
 
                 var backupInfo = recording.HasBackupChannels ? " (backup channels available)" : "";
                 _logger.LogInformation(
@@ -336,7 +329,6 @@ public class RecordingScheduler
             catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
             {
                 // Shouldn't happen after a wipe, but handle gracefully
-                _scheduledPrograms.Add(recording.Program.Id);
                 _logger.LogDebug("Timer already exists for '{Title}' - skipping", recording.Title);
             }
             catch (Exception ex)
@@ -358,7 +350,9 @@ public class RecordingScheduler
 
     /// <summary>
     /// Confirmation scan: compare current EPG matches against existing timers.
-    /// Adds new matches and removes stale timers.
+    /// Uses BuildTimerKey (name+channel+time) as the SOLE dedup mechanism to handle
+    /// programme GUID changes across guide refreshes. Passes existing timer windows
+    /// to the scheduler so it respects already-occupied slots.
     /// </summary>
     private async Task<ScanResult> ConfirmationScanAsync(
         IReadOnlyList<Subscription> subscriptions,
@@ -377,10 +371,8 @@ public class RecordingScheduler
         }
 
         var existingTimers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
-        var existingProgramIds = new HashSet<string>(
-            existingTimers
-                .Select(t => t.ProgramId)
-                .Where(id => !string.IsNullOrEmpty(id))!);
+        
+        // Use ONLY BuildTimerKey for dedup (stable across guide refreshes, unlike programme GUIDs)
         var existingTimerKeys = new HashSet<string>(
             existingTimers.Select(t => BuildTimerKey(t.Name, t.ChannelId.ToString(), t.StartDate)),
             StringComparer.OrdinalIgnoreCase);
@@ -389,18 +381,17 @@ public class RecordingScheduler
         var allMatches = FindAllMatches(programs, subscriptions, cancellationToken);
         result.MatchesFound = allMatches.Count;
 
-        // Step 3: Separate into new vs already-scheduled
+        // Step 3: Separate into new vs already-scheduled using ONLY timer keys
         var newMatches = new List<MatchedProgram>();
         var alreadyScheduledCount = 0;
 
         foreach (var match in allMatches)
         {
             var timerKey = BuildTimerKey(match.Program.Name, match.Program.ChannelGuid.ToString(), match.Program.StartDate);
-            if (existingProgramIds.Contains(match.Program.Id)
-                || _scheduledPrograms.Contains(match.Program.Id)
-                || existingTimerKeys.Contains(timerKey))
+            if (existingTimerKeys.Contains(timerKey))
             {
                 alreadyScheduledCount++;
+                _logger.LogDebug("Already scheduled: '{Title}' (key: {Key})", match.Program.Name, timerKey);
             }
             else
             {
@@ -412,22 +403,27 @@ public class RecordingScheduler
             "Confirmation scan: {Total} matches ({New} new, {Existing} already scheduled)",
             allMatches.Count, newMatches.Count, alreadyScheduledCount);
 
-        // Step 4: Schedule new matches if slots available
+        // Step 4: Schedule new matches — pass existing timer windows so scheduler sees occupied slots
         var scheduledCount = 0;
         var alreadyExisted = 0;
         if (newMatches.Count > 0)
         {
-            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent);
+            // Build existing timer time windows for the scheduler to account for
+            var existingSlots = existingTimers
+                .Where(t => t.StartDate > DateTime.UtcNow)
+                .Select(t => (Start: t.StartDate, End: t.EndDate))
+                .ToList();
+
+            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent, existingSlots);
             foreach (var recording in schedule)
             {
                 try
                 {
                     await ScheduleRecordingAsync(recording, cancellationToken).ConfigureAwait(false);
                     scheduledCount++;
-                    _scheduledPrograms.Add(recording.Program.Id);
 
                     _logger.LogInformation(
-                        "Scheduled (new): {Title} at {Time} on {Channel}",
+                        "Scheduled (new): '{Title}' at {Time} on {Channel}",
                         recording.Title,
                         recording.StartTime.ToLocalTime().ToString("g"),
                         recording.ChannelName);
@@ -435,7 +431,7 @@ public class RecordingScheduler
                 catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
                 {
                     alreadyExisted++;
-                    _scheduledPrograms.Add(recording.Program.Id);
+                    _logger.LogDebug("Timer already exists for '{Title}' - skipping", recording.Title);
                 }
                 catch (Exception ex)
                 {
@@ -451,11 +447,6 @@ public class RecordingScheduler
             allMatches.Select(m => BuildTimerKey(m.Program.Name, m.Program.ChannelGuid.ToString(), m.Program.StartDate)),
             StringComparer.OrdinalIgnoreCase);
 
-        // Build a set of program IDs currently in the EPG (not from timers)
-        // so we can detect when a timer's program has been removed from the guide
-        var currentEpgProgramIds = new HashSet<string>(
-            programs.Select(p => p.Id).Where(id => !string.IsNullOrEmpty(id)));
-
         foreach (var timer in existingTimers)
         {
             // Only check future timers that we created (identified by "Subscription:" in overview)
@@ -464,11 +455,10 @@ public class RecordingScheduler
             if (!overview.Contains("subscription:")) continue;
 
             var timerKey = BuildTimerKey(timer.Name, timer.ChannelId.ToString(), timer.StartDate);
-            if (!matchedProgramKeys.Contains(timerKey) && !currentEpgProgramIds.Contains(timer.ProgramId ?? string.Empty))
+            if (!matchedProgramKeys.Contains(timerKey))
             {
-                // This timer no longer matches any EPG program - may have been removed
                 _logger.LogWarning(
-                    "Stale timer detected: '{Title}' at {Time} - program no longer in EPG, cancelling",
+                    "Stale timer detected: '{Title}' at {Time} - no matching EPG program, cancelling",
                     timer.Name,
                     timer.StartDate.ToLocalTime().ToString("g"));
 
@@ -505,6 +495,9 @@ public class RecordingScheduler
         CancellationToken cancellationToken)
     {
         var matches = new List<MatchedProgram>();
+        var scoredCount = 0;
+        var noSubCount = 0;
+        var excludedCount = 0;
 
         foreach (var program in programs)
         {
@@ -526,18 +519,33 @@ public class RecordingScheduler
             {
                 continue;
             }
+            scoredCount++;
 
             var matchedSub = FindMatchingSubscription(program, scored, subscriptions);
             if (matchedSub == null)
             {
+                noSubCount++;
+                _logger.LogDebug(
+                    "No sub: '{Title}' | score={Score} | genres=[{Genres}] | episode='{Episode}' | isLive={IsLive}",
+                    program.Name, scored.Score,
+                    string.Join(", ", program.Genres ?? Array.Empty<string>()),
+                    program.EpisodeTitle, program.IsLive);
                 continue;
             }
 
             if (ShouldExclude(program, scored, matchedSub))
             {
-                _logger.LogDebug("Excluding '{Title}' - exclusion pattern or replay", program.Name);
+                excludedCount++;
+                _logger.LogDebug("Excluded: '{Title}' matched sub '{Sub}' but filtered out (isLive={IsLive}, isReplay={IsReplay})",
+                    program.Name, matchedSub.Name, program.IsLive, scored.IsReplay);
                 continue;
             }
+
+            _logger.LogInformation(
+                "MATCH: '{Title}' -> sub '{Sub}' ({SubType}) | score={Score}, genres=[{Genres}], episode='{Episode}', isLive={IsLive}",
+                program.Name, matchedSub.Name, matchedSub.Type, scored.Score,
+                string.Join(", ", program.Genres ?? Array.Empty<string>()),
+                program.EpisodeTitle, program.IsLive);
 
             matches.Add(new MatchedProgram
             {
@@ -546,6 +554,10 @@ public class RecordingScheduler
                 Subscription = matchedSub
             });
         }
+
+        _logger.LogInformation(
+            "Match summary: {Scored} passed scoring, {Matched} matched subscriptions, {NoSub} no sub, {Excluded} excluded",
+            scoredCount, matches.Count, noSubCount, excludedCount);
 
         return matches;
     }
@@ -601,7 +613,8 @@ public class RecordingScheduler
                             IsNew = program.IsNews ?? false,
                             IsPremiere = program.IsPremiere ?? false,
                             IsRepeat = program.IsRepeat ?? false,
-                            EpisodeTitle = program.EpisodeTitle  // Teamarr stores league info here (e.g., "NBA")
+                            EpisodeTitle = program.EpisodeTitle,  // Teamarr stores league info here (e.g., "NBA")
+                            Genres = program.Genres ?? Array.Empty<string>()
                         });
                     }
                 }
@@ -694,17 +707,34 @@ public class RecordingScheduler
                     }
                     else
                     {
-                        // Use word boundary matching for leagues to avoid partial matches
-                        // e.g., "premier league" shouldn't match "Afghanistan Premier League"
-                        isMatch = MatchesWithWordBoundary(combinedText, pattern);
+                        // Build league context from structured Teamarr EPG data:
+                        // - Genres (from <category> tags): ["Sports", "Basketball", "College"]
+                        // - EpisodeTitle (from <sub-title>): "NCAAM", "NCAA Baseball", "La Liga"
+                        // - Title (which now includes league prefix): "NCAAM Brown Bears at Harvard Crimson"
+                        // Do NOT include channelName (it's the matchup, not the league)
+                        var genresLower = program.Genres?.Select(g => g.ToLowerInvariant()).ToArray() ?? Array.Empty<string>();
+                        var leagueContext = $"{title} {episodeTitle} {string.Join(" ", genresLower)}";
                         
-                        // Try common league aliases (e.g., "ncaa" = "college")
+                        // All significant words in pattern must appear in league context (AND logic)
+                        // e.g., "ncaa basketball" requires BOTH "ncaa" AND "basketball" to appear
+                        // This prevents "ncaa basketball" from matching "NCAA Baseball"
+                        var patternWords = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                        if (patternWords.Length > 0 && patternWords.All(w =>
+                            leagueContext.Contains(w, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            isMatch = true;
+                        }
+                        
+                        // Try aliases with same AND logic
                         if (!isMatch)
                         {
                             var expandedPatterns = GetLeaguePatternAliases(pattern);
                             foreach (var alias in expandedPatterns)
                             {
-                                if (MatchesWithWordBoundary(combinedText, alias))
+                                if (alias == pattern) continue; // Already checked above
+                                var aliasWords = alias.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                                if (aliasWords.Length > 0 && aliasWords.All(w =>
+                                    leagueContext.Contains(w, StringComparison.OrdinalIgnoreCase)))
                                 {
                                     isMatch = true;
                                     _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via alias '{Alias}'",
@@ -714,22 +744,10 @@ public class RecordingScheduler
                             }
                         }
                         
-                        // Also check for teamarr-style EpisodeTitle which has just the league abbreviation (e.g., "NBA")
-                        // If pattern is "nba basketball", also try just "nba" against episodeTitle
-                        if (!isMatch && !string.IsNullOrEmpty(episodeTitle))
+                        // Also try full pattern as substring of leagueContext
+                        if (!isMatch)
                         {
-                            // Get primary keyword from pattern (e.g., "nba" from "nba basketball")
-                            var patternWords = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                            foreach (var word in patternWords)
-                            {
-                                if (word.Length >= 3 && MatchesWithWordBoundary(episodeTitle, word))
-                                {
-                                    isMatch = true;
-                                    _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via EpisodeTitle '{Episode}'",
-                                        program.Name, sub.Name, program.EpisodeTitle);
-                                    break;
-                                }
-                            }
+                            isMatch = leagueContext.Contains(pattern, StringComparison.OrdinalIgnoreCase);
                         }
                     }
                     break;
@@ -810,201 +828,58 @@ public class RecordingScheduler
     }
 
     /// <summary>
-    /// Check if content is LIVE - applies to all subscription types
+    /// Check if content is LIVE - uses multiple signals from Teamarr's structured EPG.
+    /// Teamarr marks actual game broadcasts with &lt;live/&gt; tag and sport-specific &lt;category&gt; tags.
+    /// Filler (Game Starting, Game Complete, Programming) has neither.
     /// </summary>
     private static bool IsLiveContent(string title, ProgramInfo program)
     {
-        // Check program flags first
+        // Signal 1: Teamarr sets <live/> on actual game broadcasts only
         if (program.IsLive)
         {
             return true;
         }
 
-        // Include EpisodeTitle for sport type detection (teamarr stores league info there)
-        var titleWithEpisode = $"{title} {program.EpisodeTitle}";
-        var titleLower = titleWithEpisode.ToLower();
-
-        // Explicit LIVE indicators in title
-        if (LiveIndicatorPattern.IsMatch(titleWithEpisode))
+        // Signal 2: Explicit LIVE text in title
+        if (LiveIndicatorPattern.IsMatch(title))
         {
             return true;
         }
 
-        // Main Card / Prelims for events
-        if (Regex.IsMatch(titleWithEpisode, @":\s*(main\s*card|prelims?)\s*$", RegexOptions.IgnoreCase))
+        // Signal 3: Teamarr sets <category> tags (Genres) ONLY on live game programmes, not filler.
+        // If programme has sport-specific genres (Baseball, Basketball, Hockey, Soccer, etc.)
+        // AND a matchup pattern (at/vs/@) in the title, it's a live game broadcast.
+        // This handles the case where Jellyfin's IsLive doesn't map from XMLTV <live/> tag.
+        if (program.Genres != null && program.Genres.Length > 0)
         {
-            return true;
-        }
+            var hasRelevantGenre = program.Genres.Any(g =>
+                !string.Equals(g, "Sports", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(g, "Show", StringComparison.OrdinalIgnoreCase));
 
-        // Teamarr filler: "Game Starting at X:XX PM EST" = placeholder before the real game entry
-        // "Game Complete" = finished game. Both are not the actual game broadcast.
-        if (Regex.IsMatch(titleLower, @"\bgame\s+starting\s+at\b") ||
-            Regex.IsMatch(titleLower, @"\bgame\s+complete\b"))
-        {
-            return false;
-        }
-
-        // Exclude obvious non-live content
-        var nonLivePatterns = new[] {
-            "channel", "network", "tv", "24/7",            // Channel names
-            "show", "magazine", "stories", "story",        // Shows
-            "preview", "review", "analysis", "breakdown",  // Analysis content
-            "flashback", "reloaded", "archive", "repeat",  // Replays
-            "greatest", "best of", "top 10", "top ten",    // Compilations
-            "fight o'clock", "fight pass",                 // UFC filler
-            "netbusters", "goals of", "goal of",           // Highlight shows
-            "full fight", "full match",                    // Fight/match replays
-            "q&a", "q a", "faceoff", "faceoffs",           // Interviews/promos
-            "expects", "expects finish", "wants revenge",  // Interview headlines
-            "what's next", "what s next", "who's next", "who s next",  // More interviews
-            "match hls", "hls 25", "hls 24",               // Abbreviated highlights
-            "postgame", "pregame", "halftime",             // Pre/post shows
-            "afghanistan", "lanka", "india premier",       // Wrong leagues
-            "t20", "cricket", "karate", "kabaddi",         // Wrong sports with "Premier League"
-            "embedded", "countdown", "weigh-in",           // Event promos
-            "2017/", "2018/", "2019/", "2020/", "2021/", "2022/", "2023/", "2024/",  // Past season replays
-            " hl ", " hl:", ":hl ", " hls ",                // Highlights abbreviation
-            "(2008)", "(2009)", "(2010)", "(2011)", "(2012)", "(2013)", "(2014)",  // Old year replays
-            "(2015)", "(2016)", "(2017)", "(2018)", "(2019)", "(2020)", "(2021)",
-            "(2022)", "(2023)", "(2024)"
-        };
-        
-        // Also exclude past UFC events (UFC 273, 311, 323 etc. are old)
-        // Only allow current/recent UFC numbers (325, 326+)
-        if (Regex.IsMatch(titleLower, @"ufc\s*(1\d\d|2[0-4]\d|2[5-9]\d|3[01]\d|32[0-4])\b"))
-        {
-            return false; // Past UFC event number (< 325)
-        }
-        
-        // Season format "XX/YY:" (e.g., "NBA 25/26:", "Serie A 25/26:") without LIVE = scheduled rebroadcast
-        if (Regex.IsMatch(titleWithEpisode, @"\b\d{2}/\d{2}\s*:"))
-        {
-            // Only allow if it also has LIVE somewhere
-            if (!LiveIndicatorPattern.IsMatch(titleWithEpisode))
+            if (hasRelevantGenre || program.IsSports)
             {
-                return false;
+                // Has sport-specific category — check for matchup pattern in title
+                if (MatchupPattern.IsMatch(title))
+                {
+                    return true;
+                }
             }
         }
 
-        foreach (var pattern in nonLivePatterns)
-        {
-            if (titleLower.Contains(pattern))
-            {
-                return false;
-            }
-        }
-
-        // For sports games with vs/v/@/at pattern
-        // Use time-based heuristics to determine if likely live
-        if (Regex.IsMatch(titleWithEpisode, @"\s+(vs\.?|v\.?|@|at)\s+", RegexOptions.IgnoreCase))
-        {
-            // If explicitly marked live, always accept
-            if (program.IsLive)
-            {
-                return true;
-            }
-            
-            // Use time-based heuristics for game broadcasts
-            // Pass full context including EpisodeTitle for sport type detection
-            return IsLikelyLiveGameTime(titleWithEpisode, program.StartDate);
-        }
-        
-        // "Team at Team" format without prefix - likely current game
-        // Use titleWithEpisode to catch teamarr-style team names
-        if (Regex.IsMatch(titleWithEpisode, @"^[A-Z][a-zA-Z\s\(\)\-0-9]+ at [A-Z][a-zA-Z\s\(\)\-0-9]+"))
-        {
-            return true;
-        }
-
-        // Generic titles without clear indicators - exclude
-        // "Premier League", "NBA Basketball", etc. alone are not specific enough
-        // But don't exclude if it's a teamarr event with specific matchup info
-        var baseTitle = title.ToLower();  // Just the original title for this check
-        if (Regex.IsMatch(baseTitle, @"^(premier league|nba|nfl|nhl|mlb|ncaa|college|serie a|la liga|bundesliga|mma|ufc)(\s+basketball|\s+football|\s+hockey)?$", RegexOptions.IgnoreCase))
-        {
-            return false;
-        }
-
-        // If program is marked as new/premiere, consider it live
-        if (program.IsPremiere)
-        {
-            return true;
-        }
-
-        // Default: if no live indicator found, exclude
-        // This is strict but ensures only truly live content
+        // Teamarr filler exclusions: "Game Starting at", "Game Complete", "Programming"
+        // These have NO genres and NO live tag, so they naturally fall through to false here.
         return false;
     }
+
+    // Pattern for matchup indicators in title (vs/@/at between team names)
+    private static readonly Regex MatchupPattern = new(
+        @"\s+(vs\.?|v\.?|@|at)\s+",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // Pattern for LIVE indicators in title
     private static readonly Regex LiveIndicatorPattern = new(
         @"\blive\b|\(live\)|\[live\]|^live\s*:|:\s*live\s*$",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    // For events (UFC, WWE, etc.), use STRICT ALLOWLIST approach
-    // Only record if the title explicitly indicates LIVE broadcast
-    private static readonly Regex LiveEventPattern = new(
-        @"^live\s*[:\-]|[:\-]\s*live\b|\blive\s*$|\(live\)|\[live\]|" + // "Live:", ": Live", ends with "Live"
-        @"^(ufc|wwe|aew)\s+\d+\s*[:\-]?\s*(main\s*card|prelims?)|" +    // "UFC 325: Main Card" at start
-        @":\s*(main\s*card|prelims?|early\s*prelims?)\s*$",             // Ends with ": Main Card"
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    /// <summary>
-    /// Determines if a game is likely live based on time-of-day heuristics.
-    /// USA sports: 12:00 PM - 11:59 PM EST (5:00 PM - 4:59 AM UTC)
-    /// European football: 6:00 AM - 4:00 PM EST (11:00 AM - 9:00 PM UTC)
-    /// </summary>
-    private static bool IsLikelyLiveGameTime(string title, DateTime startTimeUtc)
-    {
-        var titleLower = title.ToLowerInvariant();
-        
-        // Detect sport type from title
-        var isEuropeanFootball = 
-            titleLower.Contains("premier league") ||
-            titleLower.Contains("serie a") ||
-            titleLower.Contains("la liga") ||
-            titleLower.Contains("bundesliga") ||
-            titleLower.Contains("ligue 1") ||
-            titleLower.Contains("champions league") ||
-            titleLower.Contains("europa league") ||
-            titleLower.Contains("carabao") ||
-            titleLower.Contains("fa cup") ||
-            titleLower.Contains("epl") ||
-            titleLower.Contains("pl:");
-        
-        var isUsaSport =
-            titleLower.Contains("nba") ||
-            titleLower.Contains("nfl") ||
-            titleLower.Contains("nhl") ||
-            titleLower.Contains("mlb") ||
-            titleLower.Contains("celtics") ||
-            titleLower.Contains("lakers") ||
-            titleLower.Contains("warriors") ||
-            titleLower.Contains("mavericks") ||
-            titleLower.Contains("rockets") ||
-            titleLower.Contains("ncaa") ||
-            titleLower.Contains("college");
-        
-        // Get configured region for time-based filtering
-        var config = Plugin.Instance?.Configuration;
-        var region = config?.PrimaryRegion ?? "USA";
-        
-        // Use region-aware time windows
-        return RegionTimeWindows.IsWithinLiveWindow(region, startTimeUtc.Hour, isEuropeanFootball);
-    }
-
-    private static bool IsNonLiveEventContent(string title)
-    {
-        // STRICT: Only record if it has LIVE indicators
-        // Everything else is assumed to be replays/previews/interviews
-        if (LiveEventPattern.IsMatch(title))
-        {
-            return false; // It's live, don't exclude
-        }
-
-        // No LIVE indicator = exclude (strict approach)
-        return true;
-    }
 
     private async Task ScheduleRecordingAsync(
         ScheduledRecording recording,
@@ -1142,30 +1017,44 @@ public class RecordingScheduler
     }
     
     /// <summary>
-    /// Get common aliases for league patterns to handle variations in EPG data.
-    /// e.g., "ncaa basketball" should also match "college basketball"
+    /// Get sport-specific aliases for league patterns.
+    /// IMPORTANT: Aliases are sport-specific to prevent cross-sport matching.
+    /// "ncaa basketball" should NOT expand to bare "ncaa" (which matches NCAA Baseball).
+    /// All aliases are matched using AND logic (all words must appear).
     /// </summary>
     private static IEnumerable<string> GetLeaguePatternAliases(string pattern)
     {
         var aliases = new List<string> { pattern };
         var patternLower = pattern.ToLowerInvariant();
         
-        // NCAA / College equivalence + gendered variants (NCAAM, NCAAW)
-        if (patternLower.Contains("ncaa"))
+        // NCAA Basketball variants (sport-specific, no cross-sport bleed)
+        if (patternLower == "ncaa basketball" || patternLower == "college basketball")
         {
-            aliases.Add(patternLower.Replace("ncaa", "college"));
-            aliases.Add("ncaam");   // NCAA Men's
-            aliases.Add("ncaaw");   // NCAA Women's
             aliases.Add("ncaa basketball");
-            aliases.Add("ncaa football");
             aliases.Add("college basketball");
+            aliases.Add("ncaam");   // Teamarr uses this in EpisodeTitle
+            aliases.Add("ncaaw");   // Women's
+        }
+        
+        // NCAA Football variants (sport-specific)
+        if (patternLower == "ncaa football" || patternLower == "college football")
+        {
+            aliases.Add("ncaa football");
             aliases.Add("college football");
         }
-        else if (patternLower.Contains("college"))
+        
+        // NCAA Baseball variants (sport-specific)
+        if (patternLower == "ncaa baseball" || patternLower == "college baseball")
         {
-            aliases.Add(patternLower.Replace("college", "ncaa"));
-            aliases.Add("ncaam");
-            aliases.Add("ncaaw");
+            aliases.Add("ncaa baseball");
+            aliases.Add("college baseball");
+        }
+        
+        // NCAA Hockey variants (sport-specific)
+        if (patternLower == "ncaa hockey" || patternLower == "college hockey")
+        {
+            aliases.Add("ncaa hockey");
+            aliases.Add("college hockey");
         }
         
         // NBA equivalence
@@ -1212,14 +1101,20 @@ public class RecordingScheduler
         if (patternLower.Contains("serie a"))
         {
             aliases.Add("italian serie a");
-            aliases.Add("serie a soccer");
         }
         
-        // March Madness / NCAA Tournament
+        // March Madness → NCAA Basketball Tournament
         if (patternLower.Contains("march madness"))
         {
             aliases.Add("ncaa tournament");
-            aliases.Add("college basketball");
+            aliases.Add("ncaam");
+        }
+        
+        // Champions League
+        if (patternLower.Contains("champions league"))
+        {
+            aliases.Add("ucl");
+            aliases.Add("uefa champions league");
         }
         
         return aliases.Distinct();
@@ -1278,4 +1173,7 @@ public class ProgramInfo
     
     /// <summary>Gets or sets the episode title (often contains league info from teamarr).</summary>
     public string? EpisodeTitle { get; set; }
+
+    /// <summary>Gets or sets the genres/categories from XMLTV (e.g., ["Sports", "Basketball", "College"]).</summary>
+    public string[] Genres { get; set; } = Array.Empty<string>();
 }

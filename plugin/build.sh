@@ -29,7 +29,14 @@ mkdir -p "$OUTPUT_DIR"
 echo "Packaging plugin..."
 cp bin/Release/net9.0/Jellyfin.Plugin.SportsDVR.dll "$OUTPUT_DIR/"
 
-# Create meta.json for the plugin
+# Copy the icon into dist
+if [ -f "$PROJECT_DIR/sports-dvr-icon.png" ]; then
+    cp "$PROJECT_DIR/sports-dvr-icon.png" "$OUTPUT_DIR/"
+fi
+
+# Create meta.json for INSTALLED plugin (flat format — Jellyfin reads this at runtime)
+# Note: The "versions" array format is for plugin REPOSITORIES only.
+#       Installed plugins use a flat manifest with version/targetAbi/status at the top level.
 cat > "$OUTPUT_DIR/meta.json" << 'EOF'
 {
     "guid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
@@ -38,15 +45,13 @@ cat > "$OUTPUT_DIR/meta.json" << 'EOF'
     "overview": "Scans your Teamarr + Dispatcharr EPG for live sports, deduplicates games, and schedules recordings with smart priority and concurrency management. Requires a Teamarr-enriched EPG for accurate matching.",
     "owner": "whizzard80",
     "category": "Live TV",
-    "versions": [
-        {
-            "version": "1.1.0.0",
-            "changelog": "Smart scheduling with concurrency limits, game deduplication, EPG scan task, guide cache purge, drag-to-reorder subscriptions, nuclear timer clear, plugin branding",
-            "targetAbi": "10.11.0.0",
-            "sourceUrl": "https://github.com/whizzard80/jellyfin-sports-dvr/releases",
-            "timestamp": "2026-02-08T00:00:00Z"
-        }
-    ]
+    "version": "1.1.0.0",
+    "targetAbi": "10.11.0.0",
+    "changelog": "Smart scheduling with concurrency limits, game deduplication, EPG scan task, guide cache purge, drag-to-reorder subscriptions, nuclear timer clear, plugin branding",
+    "status": "Active",
+    "autoUpdate": false,
+    "imagePath": "sports-dvr-icon.png",
+    "assemblies": []
 }
 EOF
 

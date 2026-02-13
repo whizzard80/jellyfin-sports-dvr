@@ -33,10 +33,12 @@ public class SmartScheduler
     /// </summary>
     /// <param name="matches">All programs that match subscriptions.</param>
     /// <param name="maxConcurrent">Maximum concurrent recordings (connection limit).</param>
+    /// <param name="existingSlots">Optional: time windows of already-scheduled timers to avoid overfilling concurrent slots.</param>
     /// <returns>Optimized list of programs to record.</returns>
     public List<ScheduledRecording> CreateSchedule(
         List<MatchedProgram> matches,
-        int maxConcurrent)
+        int maxConcurrent,
+        List<(DateTime Start, DateTime End)>? existingSlots = null)
     {
         if (matches.Count == 0)
         {
@@ -44,9 +46,10 @@ public class SmartScheduler
         }
 
         _logger.LogInformation(
-            "Creating optimized schedule from {Count} matched programs with {Max} max concurrent",
+            "Creating optimized schedule from {Count} matched programs with {Max} max concurrent ({Existing} existing timers)",
             matches.Count,
-            maxConcurrent);
+            maxConcurrent,
+            existingSlots?.Count ?? 0);
 
         // Step 1: Detect and group duplicate broadcasts (same game on multiple channels)
         var uniqueGames = DeduplicateGames(matches);
@@ -64,8 +67,8 @@ public class SmartScheduler
             .ThenBy(g => g.Primary.Program.StartDate)
             .ToList();
 
-        // Step 3: Build schedule respecting connection limits
-        var schedule = BuildSchedule(sortedGames, maxConcurrent);
+        // Step 3: Build schedule respecting connection limits (including existing timers)
+        var schedule = BuildSchedule(sortedGames, maxConcurrent, existingSlots);
 
         _logger.LogInformation(
             "Final schedule: {Scheduled} recordings from {Total} unique games",
@@ -393,8 +396,12 @@ public class SmartScheduler
     /// Builds an optimized schedule respecting connection limits.
     /// Checks for actual temporal overlap (accounting for full program duration)
     /// so that non-overlapping games on different time slots are not blocked.
+    /// Accounts for existing timer windows so confirmation scans don't overfill slots.
     /// </summary>
-    private List<ScheduledRecording> BuildSchedule(List<GameGroup> sortedGames, int maxConcurrent)
+    private List<ScheduledRecording> BuildSchedule(
+        List<GameGroup> sortedGames,
+        int maxConcurrent,
+        List<(DateTime Start, DateTime End)>? existingSlots = null)
     {
         var schedule = new List<ScheduledRecording>();
 
@@ -404,18 +411,22 @@ public class SmartScheduler
             var startTime = program.StartDate;
             var endTime = program.EndDate;
 
-            // Find all already-scheduled recordings that actually overlap with this game's
-            // time window. Two recordings overlap when: existingStart < newEnd AND existingEnd > newStart.
-            // This correctly handles games sorted by priority (not chronologically) and accounts
-            // for full program duration, not just start times.
-            var overlapping = schedule
+            // Count overlapping recordings from our NEW schedule
+            var overlappingNew = schedule
                 .Where(r => r.StartTime < endTime && r.EndTime > startTime)
                 .ToList();
 
-            if (overlapping.Count >= maxConcurrent)
+            // Also count overlapping existing timers (already scheduled from previous scans)
+            var overlappingExisting = existingSlots?
+                .Count(s => s.Start < endTime && s.End > startTime) ?? 0;
+
+            var totalOverlapping = overlappingNew.Count + overlappingExisting;
+
+            if (totalOverlapping >= maxConcurrent)
             {
-                // No capacity - check if we should preempt a lower priority recording
-                var lowestPriority = overlapping
+                // No capacity - check if we should preempt a lower priority NEW recording
+                // (we can't preempt existing timers, only new ones we're adding)
+                var lowestPriority = overlappingNew
                     .OrderBy(r => r.Priority)
                     .FirstOrDefault();
 
@@ -435,11 +446,13 @@ public class SmartScheduler
                 {
                     // Can't schedule - log conflict
                     _logger.LogWarning(
-                        "Cannot schedule '{Game}' at {Start}-{End} - {Count} overlapping recordings (max {Max} concurrent)",
+                        "Cannot schedule '{Game}' at {Start}-{End} - {Count} overlapping recordings ({CountNew} new + {CountExisting} existing, max {Max} concurrent)",
                         program.Name,
                         startTime.ToLocalTime().ToString("g"),
                         endTime.ToLocalTime().ToString("g"),
-                        overlapping.Count,
+                        totalOverlapping,
+                        overlappingNew.Count,
+                        overlappingExisting,
                         maxConcurrent);
                     continue;
                 }
@@ -468,7 +481,7 @@ public class SmartScheduler
                 recording.EndTime.ToLocalTime().ToString("g"),
                 recording.ChannelName,
                 recording.Priority,
-                overlapping.Count + 1);
+                totalOverlapping + 1);
         }
 
         return schedule;
