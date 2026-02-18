@@ -20,7 +20,6 @@ public class SportsScorer
     private const int SCORE_V_PATTERN = 40;
     private const int SCORE_TWO_TEAMS_SAME_SPORT = 40;
     private const int SCORE_SPORTS_CHANNEL = 25;
-    private const int SCORE_VENUE_WITH_MATCHUP = 20;
     private const int SCORE_SPORTS_CATEGORY = 15;
     private const int SCORE_LEAGUE_IN_TITLE = 12;
     private const int SCORE_ONE_KNOWN_TEAM = 8;
@@ -37,7 +36,8 @@ public class SportsScorer
     // Pre-compiled patterns for performance
     private static readonly Regex VsPattern = new(@"\s+(vs\.?|versus)\s+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex AtSymbolPattern = new(@"\s+@\s+", RegexOptions.Compiled);
-    private static readonly Regex AtWordPattern = new(@"\s+at\s+(?=[A-Z])", RegexOptions.Compiled);
+    // Case-insensitive "at" with word boundary — works on lowercased text too
+    private static readonly Regex AtWordPattern = new(@"\s+at\s+\w", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex VPattern = new(@"\s+v\s+", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex ReplayPattern = new(@"\b(replay|classic|encore|rerun|vintage|throwback)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex YearPrefixPattern = new(@"^(19[5-9]\d|20[0-2]\d)\s+", RegexOptions.Compiled);
@@ -51,7 +51,8 @@ public class SportsScorer
     // Only flag clearly past seasons like 23/24, 22/23, etc.
     private static readonly Regex PastSeasonPattern = new(@"\b(1[89]|20|21|22|23|24)[/-](1[89]|20|21|22|23|24|25)\s*:", RegexOptions.Compiled);
     private static readonly Regex NonSportsPattern = new(@"\b(news|weather|forecast|talk\s*show|documentary|movie|film)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex PregamePattern = new(@"\b(pregame|postgame|halftime|preview|highlights|analysis|studio|report)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    // Pregame/postgame — excludes "highlights" (already penalized separately by HighlightsPattern)
+    private static readonly Regex PregamePattern = new(@"\b(pregame|pre-game|postgame|post-game|halftime|half-time|preview|analysis|studio|report|pre-match|post-match|warmup|warm-up)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     
     // UFC numbered events: "UFC 299", "UFC 300: Main Card", etc.
     private static readonly Regex UfcNumberedPattern = new(@"\bUFC\s+(\d{2,3})\b", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -64,12 +65,6 @@ public class SportsScorer
         @"previews?|breakdown|react|wants\s+revenge|" +  // Interview/analysis content
         @"full\s+fight|fight\s+night\s+\d|ufc\s+\d+\s*[-:]\s*\w+\s+v\s+\w+\s+\(\d{4}\))\b",  // Past fights with years
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    // Live UFC event indicators - what we WANT to record
-    private static readonly Regex UfcLiveEventPattern = new(
-        @"\b(main\s*card|prelims?|early\s*prelims?|fight\s*night.*live|ufc\s+\d{3}.*live)\b|" +
-        @"^live[:\s].*ufc|ufc.*\blive\b",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    
     private const int SCORE_UFC_NUMBERED = 45;         // UFC 299, UFC 300, etc.
     private const int SCORE_LIVE_INDICATOR = 10;       // "LIVE" tag bonus
     private static readonly Regex TeamExtractVs = new(@"^(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s*[-–—\(\[\|]|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -90,75 +85,156 @@ public class SportsScorer
         "discovery", "tlc", "lifetime", "hallmark", "comedy central", "cartoon", "disney"
     };
 
-    // Teams by league (key teams for matching)
+    // Teams by league — used for dedup (same-league team detection) and scoring bonus.
+    // Use nicknames since Teamarr sends full names ("Chicago Bulls at Boston Celtics") 
+    // and Contains() matches substrings. Multi-word nicknames work ("red sox", "golden knights").
     private static readonly Dictionary<string, HashSet<string>> TeamsByLeague = new(StringComparer.OrdinalIgnoreCase)
     {
         ["NBA"] = new(StringComparer.OrdinalIgnoreCase) {
             "celtics", "lakers", "warriors", "bulls", "heat", "knicks", "nets", "76ers", "sixers",
-            "mavericks", "nuggets", "suns", "bucks", "clippers", "grizzlies", "pelicans", "rockets",
-            "spurs", "raptors", "thunder", "pacers", "cavaliers", "pistons", "hawks", "hornets",
-            "magic", "timberwolves", "trail blazers", "blazers", "kings", "jazz", "wizards"
+            "mavericks", "mavs", "nuggets", "suns", "bucks", "clippers", "grizzlies", "pelicans",
+            "rockets", "spurs", "raptors", "thunder", "pacers", "cavaliers", "cavs", "pistons",
+            "hawks", "hornets", "magic", "timberwolves", "wolves", "trail blazers", "blazers",
+            "kings", "jazz", "wizards"
+        },
+        ["WNBA"] = new(StringComparer.OrdinalIgnoreCase) {
+            "aces", "dream", "fever", "liberty", "lynx", "mercury", "mystics", "sky", "sparks",
+            "storm", "sun", "wings", "valkyries", "unrivaled"
         },
         ["NFL"] = new(StringComparer.OrdinalIgnoreCase) {
-            "patriots", "cowboys", "packers", "chiefs", "49ers", "eagles", "bills", "ravens",
-            "dolphins", "jets", "giants", "steelers", "browns", "bengals", "raiders", "chargers",
-            "broncos", "seahawks", "rams", "cardinals", "saints", "buccaneers", "falcons", "panthers",
-            "bears", "lions", "vikings", "titans", "colts", "texans", "jaguars", "commanders"
+            "patriots", "cowboys", "packers", "chiefs", "49ers", "niners", "eagles", "bills",
+            "ravens", "dolphins", "jets", "giants", "steelers", "browns", "bengals", "raiders",
+            "chargers", "broncos", "seahawks", "rams", "cardinals", "saints", "buccaneers", "bucs",
+            "falcons", "panthers", "bears", "lions", "vikings", "titans", "colts", "texans",
+            "jaguars", "jags", "commanders"
         },
         ["NHL"] = new(StringComparer.OrdinalIgnoreCase) {
-            "bruins", "rangers", "maple leafs", "canadiens", "penguins", "blackhawks", "red wings",
-            "flyers", "capitals", "lightning", "avalanche", "oilers", "flames", "canucks", "sharks",
-            "ducks", "kings", "blues", "wild", "predators", "jets", "stars", "hurricanes", "devils",
-            "islanders", "sabres", "senators", "panthers", "kraken", "golden knights", "blue jackets"
+            "bruins", "rangers", "maple leafs", "canadiens", "habs", "penguins", "pens",
+            "blackhawks", "red wings", "flyers", "capitals", "caps", "lightning", "bolts",
+            "avalanche", "avs", "oilers", "flames", "canucks", "sharks", "ducks", "kings",
+            "blues", "wild", "predators", "preds", "jets", "stars", "hurricanes", "canes",
+            "devils", "islanders", "isles", "sabres", "senators", "sens", "panthers", "kraken",
+            "golden knights", "blue jackets", "utah hockey club"
         },
         ["MLB"] = new(StringComparer.OrdinalIgnoreCase) {
-            "yankees", "red sox", "dodgers", "cubs", "giants", "mets", "cardinals", "braves",
-            "astros", "phillies", "padres", "white sox", "reds", "brewers", "twins", "angels",
-            "mariners", "rangers", "blue jays", "rays", "royals", "athletics", "tigers", "guardians",
-            "orioles", "pirates", "nationals", "rockies", "marlins", "diamondbacks"
+            "yankees", "red sox", "dodgers", "cubs", "giants", "mets", "cardinals", "cards",
+            "braves", "astros", "stros", "phillies", "padres", "white sox", "reds", "brewers",
+            "twins", "angels", "mariners", "rangers", "blue jays", "jays", "rays", "royals",
+            "athletics", "tigers", "guardians", "orioles", "pirates", "nationals", "nats",
+            "rockies", "marlins", "diamondbacks", "dbacks"
+        },
+        ["MLS"] = new(StringComparer.OrdinalIgnoreCase) {
+            "inter miami", "lafc", "la galaxy", "galaxy", "atlanta united", "sounders",
+            "timbers", "sporting kc", "real salt lake", "nashville sc", "austin fc",
+            "columbus crew", "crew", "fc cincinnati", "charlotte fc", "cf montreal",
+            "new york red bulls", "red bulls", "nycfc", "new england revolution",
+            "revs", "dc united", "orlando city", "toronto fc", "minnesota united",
+            "houston dynamo", "dynamo", "colorado rapids", "rapids", "st louis city",
+            "vancouver whitecaps", "san jose earthquakes", "philadelphia union",
+            "san diego fc"
         },
         ["EPL"] = new(StringComparer.OrdinalIgnoreCase) {
-            "arsenal", "chelsea", "liverpool", "manchester city", "man city", "manchester united",
-            "man utd", "tottenham", "spurs", "newcastle", "west ham", "aston villa", "brighton",
-            "fulham", "brentford", "crystal palace", "everton", "wolves", "nottingham forest",
-            "bournemouth", "luton", "burnley", "sheffield united"
+            "arsenal", "chelsea", "liverpool", "manchester city", "man city",
+            "manchester united", "man utd", "man united", "tottenham", "spurs",
+            "newcastle", "newcastle united", "west ham", "aston villa", "brighton",
+            "fulham", "brentford", "crystal palace", "everton", "wolves",
+            "wolverhampton", "nottingham forest", "bournemouth", "leicester",
+            "ipswich", "southampton"
         },
         ["LaLiga"] = new(StringComparer.OrdinalIgnoreCase) {
-            "barcelona", "real madrid", "atletico madrid", "sevilla", "valencia", "villarreal",
-            "real betis", "athletic bilbao", "real sociedad", "getafe", "celta vigo", "osasuna"
+            "barcelona", "barca", "real madrid", "atletico madrid", "atletico",
+            "sevilla", "valencia", "villarreal", "real betis", "betis",
+            "athletic bilbao", "bilbao", "real sociedad", "sociedad", "getafe",
+            "celta vigo", "osasuna", "mallorca", "rayo vallecano", "girona",
+            "las palmas", "alaves", "valladolid", "espanyol", "leganes"
         },
         ["Bundesliga"] = new(StringComparer.OrdinalIgnoreCase) {
-            "bayern munich", "bayern", "borussia dortmund", "dortmund", "rb leipzig", "leverkusen",
-            "frankfurt", "wolfsburg", "gladbach", "freiburg", "hoffenheim", "stuttgart"
+            "bayern munich", "bayern", "borussia dortmund", "dortmund", "bvb",
+            "rb leipzig", "leipzig", "bayer leverkusen", "leverkusen",
+            "eintracht frankfurt", "frankfurt", "wolfsburg", "gladbach",
+            "borussia monchengladbach", "freiburg", "hoffenheim", "stuttgart",
+            "union berlin", "mainz", "werder bremen", "augsburg",
+            "bochum", "heidenheim", "darmstadt", "st pauli", "holstein kiel"
         },
         ["SerieA"] = new(StringComparer.OrdinalIgnoreCase) {
-            "juventus", "inter milan", "inter", "ac milan", "milan", "napoli", "roma", "lazio",
-            "atalanta", "fiorentina", "torino", "bologna", "sassuolo"
+            "juventus", "juve", "inter milan", "ac milan", "napoli", "roma",
+            "as roma", "lazio", "ss lazio", "atalanta", "fiorentina", "torino",
+            "bologna", "monza", "udinese", "empoli", "genoa", "cagliari",
+            "lecce", "verona", "salernitana", "frosinone", "como", "parma", "venezia"
+        },
+        ["Ligue1"] = new(StringComparer.OrdinalIgnoreCase) {
+            "psg", "paris saint-germain", "paris saint germain", "marseille",
+            "olympique marseille", "lyon", "olympique lyonnais", "monaco",
+            "as monaco", "lille", "lens", "rennes", "nice", "ogc nice",
+            "strasbourg", "montpellier", "nantes", "toulouse", "brest",
+            "reims", "lorient", "metz", "clermont", "le havre"
+        },
+        ["LigaMX"] = new(StringComparer.OrdinalIgnoreCase) {
+            "club america", "america", "chivas", "guadalajara", "cruz azul",
+            "monterrey", "rayados", "tigres", "uanl", "pumas", "unam",
+            "santos laguna", "toluca", "leon", "atlas", "pachuca",
+            "puebla", "tijuana", "xolos", "necaxa", "mazatlan",
+            "queretaro", "juarez", "san luis"
         },
         ["UFC"] = new(StringComparer.OrdinalIgnoreCase) { "ufc" },
-        ["F1"] = new(StringComparer.OrdinalIgnoreCase) { "formula 1", "f1", "grand prix" }
+        ["F1"] = new(StringComparer.OrdinalIgnoreCase) { "formula 1", "f1", "grand prix" },
+        ["NASCAR"] = new(StringComparer.OrdinalIgnoreCase) { "nascar", "daytona", "talladega" }
     };
 
-    // League detection keywords
+    // League detection keywords — includes Gracenote category strings ({gracenote_category})
+    // that Teamarr puts in the title. Must be lowercase for comparison.
     private static readonly Dictionary<string, string[]> LeagueKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
         ["NBA"] = new[] { "nba", "nba basketball" },
+        ["WNBA"] = new[] { "wnba", "wnba basketball", "women's nba" },
         ["NFL"] = new[] { "nfl", "nfl football" },
-        ["NHL"] = new[] { "nhl", "nhl hockey" },
+        ["NHL"] = new[] { "nhl", "nhl hockey", "ice hockey" },
         ["MLB"] = new[] { "mlb", "mlb baseball" },
-        ["NCAA"] = new[] { "ncaa", "ncaam", "ncaaw", "college basketball", "college football", "college hockey", "march madness" },
-        ["EPL"] = new[] { "epl", "premier league", "english premier league" },
-        ["LaLiga"] = new[] { "la liga", "spanish la liga" },
-        ["Bundesliga"] = new[] { "bundesliga", "german bundesliga" },
-        ["SerieA"] = new[] { "serie a", "italian serie a" },
-        ["Champions League"] = new[] { "champions league", "ucl", "uefa champions league" },
-        ["Europa League"] = new[] { "europa league", "uefa europa league" },
-        ["MLS"] = new[] { "mls", "major league soccer" },
+        ["NCAA"] = new[] { "ncaa", "ncaam", "ncaaw", "ncaab",
+            "college basketball", "college football", "college hockey", "college baseball",
+            "college softball", "college soccer", "college lacrosse", "college volleyball",
+            "men's college basketball", "women's college basketball",
+            "men's college hockey", "women's college hockey",
+            "march madness", "college world series" },
+        ["EPL"] = new[] { "epl", "premier league", "english premier league",
+            "premier league soccer", "english premier league soccer" },
+        ["LaLiga"] = new[] { "la liga", "spanish la liga", "la liga soccer" },
+        ["Bundesliga"] = new[] { "bundesliga", "german bundesliga", "bundesliga soccer" },
+        ["SerieA"] = new[] { "serie a", "italian serie a", "serie a soccer" },
+        ["Ligue1"] = new[] { "ligue 1", "french ligue 1", "ligue 1 soccer" },
+        ["Champions League"] = new[] { "champions league", "ucl",
+            "uefa champions league", "uefa champions league soccer" },
+        ["Europa League"] = new[] { "europa league", "uefa europa league",
+            "uefa europa league soccer" },
+        ["Conference League"] = new[] { "conference league",
+            "europa conference league", "uefa europa conference league" },
+        ["MLS"] = new[] { "mls", "major league soccer", "mls soccer" },
+        ["LigaMX"] = new[] { "liga mx", "mexican liga mx", "liga mx soccer" },
+        ["CONCACAF"] = new[] { "concacaf", "concacaf champions", "gold cup" },
+        ["Copa America"] = new[] { "copa america", "copa américa" },
+        ["AFC"] = new[] { "afc champions", "afc asian cup" },
+        ["CFL"] = new[] { "cfl", "canadian football" },
+        ["XFL"] = new[] { "xfl", "ufl" },
+        ["NWSL"] = new[] { "nwsl", "national women's soccer" },
         ["UFC"] = new[] { "ufc" },
-        ["Boxing"] = new[] { "boxing", "wbc", "wba", "ibf", "wbo" },
-        ["F1"] = new[] { "formula 1", "f1" },
-        ["WWE"] = new[] { "wwe", "raw", "smackdown" },
-        ["Golf"] = new[] { "pga", "lpga", "liv golf" }
+        ["Boxing"] = new[] { "boxing", "wbc", "wba", "ibf", "wbo", "professional boxing" },
+        ["MMA"] = new[] { "mma", "bellator", "pfl", "one championship" },
+        ["F1"] = new[] { "formula 1", "f1", "formula one" },
+        ["NASCAR"] = new[] { "nascar", "nascar cup", "nascar xfinity", "nascar trucks" },
+        ["IndyCar"] = new[] { "indycar", "indy 500", "indycar series" },
+        ["WWE"] = new[] { "wwe", "wwe raw", "wwe smackdown", "wwe nxt" },
+        ["AEW"] = new[] { "aew", "aew dynamite", "aew rampage", "aew collision" },
+        ["Golf"] = new[] { "pga", "lpga", "pga tour", "liv golf", "the masters",
+            "us open golf", "open championship", "pga championship" },
+        ["Tennis"] = new[] { "atp", "wta", "tennis", "us open tennis",
+            "wimbledon", "roland garros", "australian open" },
+        ["Rugby"] = new[] { "rugby", "six nations", "rugby world cup",
+            "super rugby", "premiership rugby" },
+        ["Cricket"] = new[] { "cricket", "ipl", "t20", "test cricket",
+            "cricket world cup", "the ashes" },
+        ["Soccer"] = new[] { "soccer", "football" },
+        ["World Cup"] = new[] { "world cup", "fifa world cup", "world cup qualifier" },
+        ["Olympics"] = new[] { "olympics", "olympic", "winter olympics", "summer olympics" }
     };
 
     public SportsScorer(ILogger<SportsScorer> logger)

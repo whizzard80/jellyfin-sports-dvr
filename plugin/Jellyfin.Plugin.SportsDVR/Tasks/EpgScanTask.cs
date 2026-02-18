@@ -11,7 +11,8 @@ namespace Jellyfin.Plugin.SportsDVR.Tasks;
 /// <summary>
 /// Jellyfin scheduled task that scans the EPG for matching sports programs
 /// and schedules recordings via the DVR.
-/// Appears in Jellyfin Dashboard → Scheduled Tasks.
+/// Runs once daily at the configured time (default 10:00 AM server local time)
+/// and once at startup. Builds the full optimized schedule for the next 24 hours.
 /// </summary>
 public class EpgScanTask : IScheduledTask
 {
@@ -39,7 +40,7 @@ public class EpgScanTask : IScheduledTask
     public string Key => "SportsDVREpgScan";
 
     /// <inheritdoc />
-    public string Description => "Scans the Electronic Program Guide for programs matching Sports DVR subscriptions and schedules recordings.";
+    public string Description => "Scans the full EPG once daily, builds an optimized recording schedule for the next 24 hours using subscription priorities.";
 
     /// <inheritdoc />
     public string Category => "Sports DVR";
@@ -47,19 +48,33 @@ public class EpgScanTask : IScheduledTask
     /// <inheritdoc />
     public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
     {
+        // Parse the configured daily scan time (e.g. "10:00")
+        var config = Plugin.Instance?.Configuration;
+        var scanTimeStr = config?.DailyScanTime ?? "10:00";
+
+        int scanHour = 10;
+        int scanMinute = 0;
+        var parts = scanTimeStr.Split(':');
+        if (parts.Length >= 2 &&
+            int.TryParse(parts[0], out var h) &&
+            int.TryParse(parts[1], out var m))
+        {
+            scanHour = Math.Clamp(h, 0, 23);
+            scanMinute = Math.Clamp(m, 0, 59);
+        }
+
         return new[]
         {
-            // Run on startup (with a brief delay handled by Jellyfin)
+            // Scan at startup so the schedule is built after a restart
             new TaskTriggerInfo
             {
                 Type = TaskTriggerInfoType.StartupTrigger
             },
-
-            // Run every 30 minutes
+            // Daily scan at the configured time
             new TaskTriggerInfo
             {
-                Type = TaskTriggerInfoType.IntervalTrigger,
-                IntervalTicks = TimeSpan.FromMinutes(30).Ticks
+                Type = TaskTriggerInfoType.DailyTrigger,
+                TimeOfDayTicks = new TimeSpan(scanHour, scanMinute, 0).Ticks
             }
         };
     }
@@ -67,7 +82,7 @@ public class EpgScanTask : IScheduledTask
     /// <inheritdoc />
     public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
     {
-        _logger.LogInformation("Sports DVR EPG scan task starting");
+        _logger.LogInformation("Sports DVR daily EPG scan starting");
         progress.Report(0);
 
         try
@@ -78,7 +93,7 @@ public class EpgScanTask : IScheduledTask
             progress.Report(100);
 
             _logger.LogInformation(
-                "Sports DVR EPG scan task complete: {Matches} matches, {New} new, {Existing} already scheduled",
+                "Sports DVR daily EPG scan complete: {Matches} matches, {New} scheduled, {Existing} already scheduled",
                 result.MatchesFound,
                 result.NewRecordings,
                 result.AlreadyScheduled);

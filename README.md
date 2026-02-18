@@ -16,15 +16,19 @@ A Jellyfin plugin for smart sports recording with team subscriptions and automat
 
 ## Features
 
-- **Team Subscriptions** - Subscribe to your favorite teams and automatically record all their games
-- **League Subscriptions** - Record all games from a league (NBA, Premier League, etc.)
-- **Event Subscriptions** - Record live events like UFC, WWE, F1
-- **Smart LIVE Detection** - Only records actual live games, not replays or highlights (via Teamarr's `<live/>` tag)
-- **Genre-Aware Matching** - "NCAA Basketball" won't match NCAA Baseball (uses EPG categories)
-- **Same-Game Deduplication** - Won't record the same game on multiple channels
-- **Connection-Aware Scheduling** - Respects your IPTV connection limits (1, 2, 6, etc.)
-- **Priority-Based Conflicts** - Higher priority subscriptions win tuner slots
-- **Teamarr + Dispatcharr Integration** - Built for `<live>` tagged EPGs with clean matchup titles
+- **Team Subscriptions** — subscribe to your favourite teams and automatically record all their games
+- **League Subscriptions** — record all games from a league (NBA, Premier League, La Liga, Champions League, MLS, etc.)
+- **Event Subscriptions** — record events like UFC, Olympics, World Cup, WWE, golf majors, tennis Grand Slams
+- **Smart LIVE Detection** — only records actual live games, not replays or highlights (uses Teamarr's `<live/>` tag + genre fallbacks)
+- **Genre-Aware Matching** — "NCAA Basketball" won't match NCAA Baseball (uses EPG `<category>` tags)
+- **Test Before You Save** — preview what a subscription would match against the current EPG before saving it
+- **Same-Game Deduplication** — won't record the same game on multiple channels
+- **Connection-Aware Scheduling** — respects your IPTV connection limits (1, 2, 6, etc.)
+- **Priority-Based Conflicts** — higher priority subscriptions win tuner slots when streams are full
+- **Sport-Specific Padding** — baseball gets 60 min post-padding (extra innings), football gets 45 min, soccer gets 30 min
+- **40+ Leagues Built-In** — NBA, NFL, NHL, MLB, MLS, WNBA, Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Liga MX, Champions League, Europa League, NCAA (all sports), UFC, F1, NASCAR, and more
+- **150+ Team Autocomplete** — config page has all major league rosters for quick subscription setup
+- **Teamarr + Dispatcharr Integration** — built for `<live/>` tagged EPGs with clean matchup titles
 
 ## Required Stack
 
@@ -353,18 +357,34 @@ That's it. The plugin will handle the rest.
 
 ## LIVE Detection
 
-The plugin's core filtering relies on the `<live>` EPG tag that Teamarr sets on live game broadcasts.
+The plugin uses multiple signals to determine if a programme is a live game broadcast:
 
 ### Will Record
-- Programs with `<live>` EPG tag **(set by Teamarr — this is the primary signal)**
-- Titles containing "LIVE:" or "(Live)" as a fallback
-- Programs with sport-specific genres AND a matchup pattern (vs/@/at) in the title
+- **Signal 1: `<live/>` EPG tag** — set by Teamarr on live game broadcasts. This is the primary signal and always trusted.
+- **Signal 2: "LIVE" in title** — fallback for EPG data without `<live/>` tags (e.g., `"LIVE: NBA Basketball"`).
+- **Signal 3a: Event-level genres** — genres like "Olympics", "World Cup", "Championship", "All-Star" are strong enough alone.
+- **Signal 3b: Sport genres + matchup pattern** — if genres include a sport (Soccer, Basketball, etc.) AND the title or subtitle contains a matchup pattern (vs/@/at), it's treated as live.
 
 ### Will Skip
-- Programs without `<live>` and no explicit LIVE keyword (replays, encores, classics)
-- Pregame/postgame filler (no `<live>` tag)
+- Programmes without any of the above signals (filler, "Game Starting", "Game Complete")
+- Pregame/postgame shows (pregame, postgame, halftime, analysis, studio)
 - Highlights, recaps, countdowns
-- Old events with years: "(2008)", "(2016)"
+- Replays/encores/classics (unless "Include Replays" is checked)
+- Old events with years in parentheses: "(2008)", "(2016)"
+- Placeholder programmes: "Next game: ..."
+
+### Sport-Specific Recording Padding
+
+The plugin automatically adjusts post-recording padding based on the sport, since different sports have wildly different overtime tendencies:
+
+| Sport | Post-Padding | Why |
+|-------|-------------|-----|
+| Baseball (MLB, NCAA) | 60 min | No clock — extra innings can add 60+ min |
+| Football (NFL, NCAA) | 45 min | Overtime + commercial breaks |
+| Basketball (NBA, WNBA, NCAA) | 30 min | Timeouts + overtime |
+| Hockey (NHL) | 30 min | Overtime + shootout |
+| Soccer (EPL, La Liga, etc.) | 30 min | Stoppage time + penalties |
+| All others | 30 min | General safety margin |
 
 ## Connection Scaling
 
@@ -373,22 +393,68 @@ The scheduler adapts to your IPTV plan:
 | Connections | Behavior |
 |-------------|----------|
 | 1 | Only highest priority games |
-| 2 | Good balance - your teams + alternates |
+| 2 | Good balance — your teams + alternates |
 | 6+ | Captures most matching games |
 
 When slots are full, higher priority subscriptions preempt lower ones.
 
+## Supported Leagues
+
+The plugin has built-in knowledge of teams and league keywords for fast, accurate matching:
+
+**North American:** NBA, WNBA, NFL, CFL, MLB, NHL, MLS, NCAA (all sports), NWSL
+
+**European Soccer:** Premier League, La Liga, Bundesliga, Serie A, Ligue 1, Liga MX, Champions League, Europa League, Conference League
+
+**Combat Sports:** UFC, Boxing, MMA (Bellator, PFL)
+
+**Motorsport:** Formula 1, NASCAR, IndyCar
+
+**Other:** Golf (PGA/LPGA), Tennis (ATP/WTA), WWE, AEW, Rugby, Cricket, Olympics, World Cup
+
+Missing your league? Use the **Match Pattern** field to match any text in the EPG.
+
+## Testing Subscriptions
+
+Before saving a subscription, use the **Test Match** button in the config page to preview what it would match against the current EPG. This shows:
+
+- Programme name and subtitle
+- Channel name
+- Start time
+- Confidence score (50+ = will record)
+
+This is especially useful for League and Event subscriptions to verify your pattern catches what you expect.
+
 ## Pattern Matching Examples
 
-| EPG Title | Detected As |
-|-----------|-------------|
-| `Live NBA: Celtics @ Mavericks` | ✅ Celtics game |
-| `Boston Celtics at Houston Rockets` | ✅ Celtics game |
-| `Serie A: Bologna vs AC Milan` | ✅ AC Milan + Serie A |
-| `UFC 325: Volkanovski vs Lopes 2` | ✅ UFC event |
-| `NBA 25/26: Lakers v Warriors` | ❌ No LIVE tag (replay) |
-| `UFC 273: Main Card (2022)` | ❌ Old event |
-| `Premier League Review` | ❌ Not a game |
+| EPG Title (Teamarr template) | Subscription | Result |
+|-------------------------------|-------------|--------|
+| Title: `"NBA Basketball"` / Subtitle: `"Bulls at Celtics"` | Team: "Celtics" | ✅ Match |
+| Title: `"UEFA Champions League Soccer"` / Subtitle: `"PSG at Monaco"` | League: "UCL" | ✅ Match (alias expands to "UEFA Champions League") |
+| Title: `"NCAA Baseball Gators at Hatters"` | League: "NCAA Baseball" | ✅ Match |
+| Title: `"Gold Zone"` / `<live/>` tag / Genres: Olympics | Event: "Olympics" | ✅ Match (genres searched) |
+| Title: `"UFC 325: Main Card"` | Event: "UFC" | ✅ Match |
+| Title: `"Game Complete"` (no genres, no `<live/>`) | any | ❌ Filler — filtered out |
+| Title: `"UFC 273: Main Card (2022)"` | Event: "UFC" | ❌ Old event — year penalty |
+| Title: `"Premier League Review"` | League: "Premier League" | ❌ Pregame/analysis show |
+
+## Troubleshooting
+
+### No matches found
+1. **Check the guide is fresh** — stale EPG showing "Game Complete" everywhere means Jellyfin hasn't refreshed. Use "Purge Guide Cache" in the plugin settings, then "Refresh Guide Data" in Dashboard → Live TV.
+2. **Use "Test Match"** — click the Test Match button when adding a subscription to see if your pattern matches anything in the current EPG.
+3. **Check your Teamarr template** — the plugin needs the `<live/>` tag enabled and `{sport}` in categories. See the [Teamarr Template Configuration](#teamarr-template-configuration) section.
+4. **Check the match pattern** — for League subscriptions, all words must appear (AND logic). "NCAA Basketball" requires both "NCAA" and "Basketball" to be present in the programme's title, subtitle, or genres.
+
+### Wrong team matched / Too many matches
+- Use **Exclude Patterns** (e.g., `preview, countdown, press conference`) to filter out non-game content.
+- For Event subscriptions, be as specific as possible: "UFC 325" instead of just "UFC".
+
+### Recordings cut off early
+- The plugin adds sport-specific padding automatically (e.g., 60 min for baseball). If you're still getting cutoffs, check that your Jellyfin DVR post-padding isn't overriding this.
+
+### Scan interval not changing
+- After changing the scan interval in settings, you may need to restart Jellyfin for the scheduled task trigger to update.
 
 ## API Endpoints
 
@@ -398,14 +464,18 @@ When slots are full, higher priority subscriptions preempt lower ones.
 | `/SportsDVR/Subscriptions` | POST | Create subscription |
 | `/SportsDVR/Subscriptions/{id}` | PUT | Update subscription |
 | `/SportsDVR/Subscriptions/{id}` | DELETE | Delete subscription |
+| `/SportsDVR/Subscriptions/Test` | POST | Test a subscription against current EPG |
 | `/SportsDVR/Status` | GET | Plugin status |
 | `/SportsDVR/Schedule/ScanNow` | POST | Trigger immediate EPG scan |
 | `/SportsDVR/Schedule/Upcoming` | GET | Get upcoming scheduled recordings |
 | `/SportsDVR/Schedule/ClearCache` | POST | Reset internal schedule tracking |
+| `/SportsDVR/Schedule/ClearTimers` | POST | Cancel Sports DVR timers |
+| `/SportsDVR/Schedule/ClearAllTimers` | POST | Cancel ALL Jellyfin timers |
+| `/SportsDVR/Schedule/PurgeGuideCache` | POST | Purge stale EPG cache and refresh |
 | `/SportsDVR/Aliases/{teamName}` | GET | Lookup team aliases |
 | `/SportsDVR/Aliases/Custom` | GET/POST/DELETE | Manage custom team aliases |
 | `/SportsDVR/Analysis/EpgStats` | GET | EPG analysis with scoring breakdown |
-| `/SportsDVR/Analysis/TestSubscriptions` | GET | Test subscriptions against current EPG |
+| `/SportsDVR/Analysis/TestSubscriptions` | GET | Test all subscriptions against EPG |
 | `/SportsDVR/Analysis/ScoreTitle` | POST | Score a single title for testing |
 
 > **Note:** All endpoints require admin authentication. Use `?api_key=YOUR_KEY` or

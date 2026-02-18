@@ -75,15 +75,18 @@
                     
                     <!-- Upcoming Recordings Dashboard -->
                     <fieldset class="verticalSection">
-                        <legend>📺 Upcoming Recordings</legend>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1em;">
+                        <legend>Upcoming Recordings</legend>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5em; flex-wrap: wrap; gap: 0.5em;">
                             <div class="fieldDescription" id="upcomingSummary">Loading...</div>
-                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.refreshUpcoming()" style="padding: 0.3em 0.8em;">
-                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">refresh</span>
-                                <span style="vertical-align: middle;">Refresh</span>
-                            </button>
+                            <div style="display: flex; gap: 0.5em; align-items: center;">
+                                <input type="text" id="upcomingFilter" placeholder="Filter by team, league..." is="emby-input" style="width: 200px; padding: 0.3em;" oninput="SportsDVR.filterUpcoming()">
+                                <button is="emby-button" type="button" class="raised" onclick="SportsDVR.refreshUpcoming()" style="padding: 0.3em 0.8em;">
+                                    <span class="material-icons" style="font-size: 1em; vertical-align: middle;">refresh</span>
+                                    <span style="vertical-align: middle;">Refresh</span>
+                                </button>
+                            </div>
                         </div>
-                        <div id="upcomingRecordingsList" style="max-height: 400px; overflow-y: auto;"></div>
+                        <div id="upcomingRecordingsList" style="max-height: 500px; overflow-y: auto;"></div>
                     </fieldset>
                     
                     <!-- Settings -->
@@ -110,9 +113,9 @@
                         </div>
                         
                         <div class="inputContainer">
-                            <label class="inputLabel" for="scanInterval">EPG Scan Interval (minutes)</label>
-                            <input type="number" id="scanInterval" min="1" max="60" value="5" is="emby-input">
-                            <div class="fieldDescription">How often to scan EPG for matching programs.</div>
+                            <label class="inputLabel" for="dailyScanTime">Daily EPG Scan Time</label>
+                            <input type="time" id="dailyScanTime" value="10:00" is="emby-input">
+                            <div class="fieldDescription">The plugin scans the full EPG once daily at this time and builds the optimized recording schedule. Uses server local time. Also runs at startup.</div>
                         </div>
                         
                         <div class="checkboxContainer checkboxContainer-withDescription">
@@ -224,78 +227,202 @@
                             <div id="nameHint" class="fieldDescription">Type to search teams or enter a custom team name.</div>
                         </div>
                         
-                        <!-- Datalists for autocomplete -->
+                        <!-- Datalists for autocomplete — all major league teams -->
                         <datalist id="teamsList">
-                            <!-- NBA -->
-                            <option value="Los Angeles Lakers">NBA</option>
-                            <option value="Los Angeles Clippers">NBA</option>
-                            <option value="Golden State Warriors">NBA</option>
+                            <!-- NBA (30 teams) -->
+                            <option value="Atlanta Hawks">NBA</option>
                             <option value="Boston Celtics">NBA</option>
                             <option value="Brooklyn Nets">NBA</option>
-                            <option value="New York Knicks">NBA</option>
-                            <option value="Philadelphia 76ers">NBA</option>
-                            <option value="Miami Heat">NBA</option>
+                            <option value="Charlotte Hornets">NBA</option>
                             <option value="Chicago Bulls">NBA</option>
-                            <option value="Dallas Mavericks">NBA</option>
-                            <option value="Houston Rockets">NBA</option>
-                            <option value="San Antonio Spurs">NBA</option>
-                            <option value="Phoenix Suns">NBA</option>
-                            <option value="Denver Nuggets">NBA</option>
-                            <option value="Milwaukee Bucks">NBA</option>
-                            <option value="Toronto Raptors">NBA</option>
-                            <option value="Minnesota Timberwolves">NBA</option>
-                            <option value="Oklahoma City Thunder">NBA</option>
                             <option value="Cleveland Cavaliers">NBA</option>
-                            <!-- NFL -->
-                            <option value="Kansas City Chiefs">NFL</option>
-                            <option value="San Francisco 49ers">NFL</option>
-                            <option value="Dallas Cowboys">NFL</option>
-                            <option value="Philadelphia Eagles">NFL</option>
-                            <option value="Buffalo Bills">NFL</option>
-                            <option value="Miami Dolphins">NFL</option>
-                            <option value="New England Patriots">NFL</option>
-                            <option value="Green Bay Packers">NFL</option>
+                            <option value="Dallas Mavericks">NBA</option>
+                            <option value="Denver Nuggets">NBA</option>
+                            <option value="Detroit Pistons">NBA</option>
+                            <option value="Golden State Warriors">NBA</option>
+                            <option value="Houston Rockets">NBA</option>
+                            <option value="Indiana Pacers">NBA</option>
+                            <option value="Los Angeles Clippers">NBA</option>
+                            <option value="Los Angeles Lakers">NBA</option>
+                            <option value="Memphis Grizzlies">NBA</option>
+                            <option value="Miami Heat">NBA</option>
+                            <option value="Milwaukee Bucks">NBA</option>
+                            <option value="Minnesota Timberwolves">NBA</option>
+                            <option value="New Orleans Pelicans">NBA</option>
+                            <option value="New York Knicks">NBA</option>
+                            <option value="Oklahoma City Thunder">NBA</option>
+                            <option value="Orlando Magic">NBA</option>
+                            <option value="Philadelphia 76ers">NBA</option>
+                            <option value="Phoenix Suns">NBA</option>
+                            <option value="Portland Trail Blazers">NBA</option>
+                            <option value="Sacramento Kings">NBA</option>
+                            <option value="San Antonio Spurs">NBA</option>
+                            <option value="Toronto Raptors">NBA</option>
+                            <option value="Utah Jazz">NBA</option>
+                            <option value="Washington Wizards">NBA</option>
+                            <!-- NFL (32 teams) -->
+                            <option value="Arizona Cardinals">NFL</option>
+                            <option value="Atlanta Falcons">NFL</option>
                             <option value="Baltimore Ravens">NFL</option>
+                            <option value="Buffalo Bills">NFL</option>
+                            <option value="Carolina Panthers">NFL</option>
+                            <option value="Chicago Bears">NFL</option>
                             <option value="Cincinnati Bengals">NFL</option>
+                            <option value="Cleveland Browns">NFL</option>
+                            <option value="Dallas Cowboys">NFL</option>
+                            <option value="Denver Broncos">NFL</option>
                             <option value="Detroit Lions">NFL</option>
-                            <!-- MLB -->
-                            <option value="New York Yankees">MLB</option>
-                            <option value="Los Angeles Dodgers">MLB</option>
+                            <option value="Green Bay Packers">NFL</option>
+                            <option value="Houston Texans">NFL</option>
+                            <option value="Indianapolis Colts">NFL</option>
+                            <option value="Jacksonville Jaguars">NFL</option>
+                            <option value="Kansas City Chiefs">NFL</option>
+                            <option value="Las Vegas Raiders">NFL</option>
+                            <option value="Los Angeles Chargers">NFL</option>
+                            <option value="Los Angeles Rams">NFL</option>
+                            <option value="Miami Dolphins">NFL</option>
+                            <option value="Minnesota Vikings">NFL</option>
+                            <option value="New England Patriots">NFL</option>
+                            <option value="New Orleans Saints">NFL</option>
+                            <option value="New York Giants">NFL</option>
+                            <option value="New York Jets">NFL</option>
+                            <option value="Philadelphia Eagles">NFL</option>
+                            <option value="Pittsburgh Steelers">NFL</option>
+                            <option value="San Francisco 49ers">NFL</option>
+                            <option value="Seattle Seahawks">NFL</option>
+                            <option value="Tampa Bay Buccaneers">NFL</option>
+                            <option value="Tennessee Titans">NFL</option>
+                            <option value="Washington Commanders">NFL</option>
+                            <!-- MLB (30 teams) -->
+                            <option value="Arizona Diamondbacks">MLB</option>
+                            <option value="Atlanta Braves">MLB</option>
+                            <option value="Baltimore Orioles">MLB</option>
                             <option value="Boston Red Sox">MLB</option>
                             <option value="Chicago Cubs">MLB</option>
-                            <option value="Atlanta Braves">MLB</option>
+                            <option value="Chicago White Sox">MLB</option>
+                            <option value="Cincinnati Reds">MLB</option>
+                            <option value="Cleveland Guardians">MLB</option>
+                            <option value="Colorado Rockies">MLB</option>
+                            <option value="Detroit Tigers">MLB</option>
                             <option value="Houston Astros">MLB</option>
+                            <option value="Kansas City Royals">MLB</option>
+                            <option value="Los Angeles Angels">MLB</option>
+                            <option value="Los Angeles Dodgers">MLB</option>
+                            <option value="Miami Marlins">MLB</option>
+                            <option value="Milwaukee Brewers">MLB</option>
+                            <option value="Minnesota Twins">MLB</option>
+                            <option value="New York Mets">MLB</option>
+                            <option value="New York Yankees">MLB</option>
+                            <option value="Oakland Athletics">MLB</option>
                             <option value="Philadelphia Phillies">MLB</option>
-                            <!-- NHL -->
+                            <option value="Pittsburgh Pirates">MLB</option>
+                            <option value="San Diego Padres">MLB</option>
+                            <option value="San Francisco Giants">MLB</option>
+                            <option value="Seattle Mariners">MLB</option>
+                            <option value="St. Louis Cardinals">MLB</option>
+                            <option value="Tampa Bay Rays">MLB</option>
+                            <option value="Texas Rangers">MLB</option>
+                            <option value="Toronto Blue Jays">MLB</option>
+                            <option value="Washington Nationals">MLB</option>
+                            <!-- NHL (32 teams) -->
+                            <option value="Anaheim Ducks">NHL</option>
+                            <option value="Boston Bruins">NHL</option>
+                            <option value="Buffalo Sabres">NHL</option>
+                            <option value="Calgary Flames">NHL</option>
+                            <option value="Carolina Hurricanes">NHL</option>
+                            <option value="Chicago Blackhawks">NHL</option>
+                            <option value="Colorado Avalanche">NHL</option>
+                            <option value="Columbus Blue Jackets">NHL</option>
+                            <option value="Dallas Stars">NHL</option>
+                            <option value="Detroit Red Wings">NHL</option>
                             <option value="Edmonton Oilers">NHL</option>
                             <option value="Florida Panthers">NHL</option>
+                            <option value="Los Angeles Kings">NHL</option>
+                            <option value="Minnesota Wild">NHL</option>
+                            <option value="Montreal Canadiens">NHL</option>
+                            <option value="Nashville Predators">NHL</option>
+                            <option value="New Jersey Devils">NHL</option>
+                            <option value="New York Islanders">NHL</option>
                             <option value="New York Rangers">NHL</option>
-                            <option value="Boston Bruins">NHL</option>
+                            <option value="Ottawa Senators">NHL</option>
+                            <option value="Philadelphia Flyers">NHL</option>
+                            <option value="Pittsburgh Penguins">NHL</option>
+                            <option value="San Jose Sharks">NHL</option>
+                            <option value="Seattle Kraken">NHL</option>
+                            <option value="St. Louis Blues">NHL</option>
+                            <option value="Tampa Bay Lightning">NHL</option>
                             <option value="Toronto Maple Leafs">NHL</option>
+                            <option value="Utah Hockey Club">NHL</option>
+                            <option value="Vancouver Canucks">NHL</option>
                             <option value="Vegas Golden Knights">NHL</option>
-                            <option value="Colorado Avalanche">NHL</option>
-                            <!-- Premier League -->
-                            <option value="Manchester City">Premier League</option>
+                            <option value="Washington Capitals">NHL</option>
+                            <option value="Winnipeg Jets">NHL</option>
+                            <!-- Premier League (20 teams) -->
                             <option value="Arsenal">Premier League</option>
-                            <option value="Liverpool">Premier League</option>
-                            <option value="Manchester United">Premier League</option>
+                            <option value="Aston Villa">Premier League</option>
+                            <option value="Bournemouth">Premier League</option>
+                            <option value="Brentford">Premier League</option>
+                            <option value="Brighton">Premier League</option>
                             <option value="Chelsea">Premier League</option>
-                            <option value="Tottenham Hotspur">Premier League</option>
+                            <option value="Crystal Palace">Premier League</option>
+                            <option value="Everton">Premier League</option>
+                            <option value="Fulham">Premier League</option>
+                            <option value="Ipswich Town">Premier League</option>
+                            <option value="Leicester City">Premier League</option>
+                            <option value="Liverpool">Premier League</option>
+                            <option value="Manchester City">Premier League</option>
+                            <option value="Manchester United">Premier League</option>
                             <option value="Newcastle United">Premier League</option>
+                            <option value="Nottingham Forest">Premier League</option>
+                            <option value="Southampton">Premier League</option>
+                            <option value="Tottenham Hotspur">Premier League</option>
+                            <option value="West Ham United">Premier League</option>
+                            <option value="Wolverhampton Wanderers">Premier League</option>
                             <!-- La Liga -->
                             <option value="Real Madrid">La Liga</option>
                             <option value="Barcelona">La Liga</option>
                             <option value="Atletico Madrid">La Liga</option>
+                            <option value="Sevilla">La Liga</option>
+                            <option value="Real Sociedad">La Liga</option>
+                            <option value="Villarreal">La Liga</option>
+                            <option value="Athletic Bilbao">La Liga</option>
+                            <option value="Real Betis">La Liga</option>
+                            <option value="Valencia">La Liga</option>
+                            <option value="Girona">La Liga</option>
+                            <!-- Bundesliga -->
+                            <option value="Bayern Munich">Bundesliga</option>
+                            <option value="Borussia Dortmund">Bundesliga</option>
+                            <option value="RB Leipzig">Bundesliga</option>
+                            <option value="Bayer Leverkusen">Bundesliga</option>
+                            <option value="Eintracht Frankfurt">Bundesliga</option>
+                            <option value="VfB Stuttgart">Bundesliga</option>
                             <!-- Serie A -->
                             <option value="Inter Milan">Serie A</option>
                             <option value="AC Milan">Serie A</option>
                             <option value="Juventus">Serie A</option>
                             <option value="Napoli">Serie A</option>
-                            <!-- Bundesliga -->
-                            <option value="Bayern Munich">Bundesliga</option>
-                            <option value="Borussia Dortmund">Bundesliga</option>
+                            <option value="AS Roma">Serie A</option>
+                            <option value="Lazio">Serie A</option>
+                            <option value="Atalanta">Serie A</option>
                             <!-- Ligue 1 -->
                             <option value="Paris Saint-Germain">Ligue 1</option>
+                            <option value="Olympique Marseille">Ligue 1</option>
+                            <option value="Olympique Lyonnais">Ligue 1</option>
+                            <option value="AS Monaco">Ligue 1</option>
+                            <option value="LOSC Lille">Ligue 1</option>
+                            <!-- Liga MX -->
+                            <option value="Club America">Liga MX</option>
+                            <option value="Chivas Guadalajara">Liga MX</option>
+                            <option value="Tigres UANL">Liga MX</option>
+                            <option value="Monterrey">Liga MX</option>
+                            <option value="Cruz Azul">Liga MX</option>
+                            <!-- MLS -->
+                            <option value="Inter Miami">MLS</option>
+                            <option value="LAFC">MLS</option>
+                            <option value="LA Galaxy">MLS</option>
+                            <option value="Atlanta United">MLS</option>
+                            <option value="Seattle Sounders">MLS</option>
+                            <option value="Columbus Crew">MLS</option>
                         </datalist>
                         
                         <datalist id="leaguesList">
@@ -409,10 +536,15 @@
                             <button is="emby-button" type="button" class="raised" onclick="SportsDVR.clearForm()">
                                 <span>Clear</span>
                             </button>
+                            <button is="emby-button" type="button" class="raised" onclick="SportsDVR.testSubscription()" title="Preview what this subscription would match against the current EPG">
+                                <span class="material-icons" style="font-size: 1em; vertical-align: middle;">science</span>
+                                <span style="vertical-align: middle;">Test Match</span>
+                            </button>
                             <button is="emby-button" type="button" class="raised button-submit" onclick="SportsDVR.saveSubscription()">
                                 <span>Save Subscription</span>
                             </button>
                         </div>
+                        <div id="testMatchResults" style="display: none; margin-top: 1em; padding: 1em; background: rgba(0,0,0,0.2); border-radius: 6px; max-height: 300px; overflow-y: auto;"></div>
                     </fieldset>
                     
                     <!-- Save Settings -->
@@ -460,7 +592,7 @@
                         const config = await ApiClient.getPluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890');
                         document.getElementById('maxConcurrent').value = config.MaxConcurrentRecordings || 2;
                         document.getElementById('primaryRegion').value = config.PrimaryRegion || 'USA';
-                        document.getElementById('scanInterval').value = config.ScanIntervalMinutes || 5;
+                        document.getElementById('dailyScanTime').value = config.DailyScanTime || '10:00';
                         document.getElementById('enableAutoScheduling').checked = config.EnableAutoScheduling !== false;
                         document.getElementById('enableAliasMatching').checked = config.EnableAliasMatching !== false;
                         document.getElementById('enableDailyGuideCachePurge').checked = config.EnableDailyGuideCachePurge !== false;
@@ -477,7 +609,7 @@
                         var maxConcurrent = parseInt(document.getElementById('maxConcurrent').value) || 2;
                         config.MaxConcurrentRecordings = Math.min(20, Math.max(1, maxConcurrent));
                         config.PrimaryRegion = document.getElementById('primaryRegion').value || 'USA';
-                        config.ScanIntervalMinutes = parseInt(document.getElementById('scanInterval').value);
+                        config.DailyScanTime = document.getElementById('dailyScanTime').value || '10:00';
                         config.EnableAutoScheduling = document.getElementById('enableAutoScheduling').checked;
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
                         config.EnableDailyGuideCachePurge = document.getElementById('enableDailyGuideCachePurge').checked;
@@ -980,6 +1112,76 @@
                     await this.loadUpcomingRecordings();
                 },
                 
+                filterUpcoming() {
+                    const filter = (document.getElementById('upcomingFilter').value || '').toLowerCase();
+                    const items = document.querySelectorAll('#upcomingRecordingsList .upcoming-item');
+                    let visible = 0;
+                    items.forEach(item => {
+                        const text = item.textContent.toLowerCase();
+                        const show = !filter || text.includes(filter);
+                        item.style.display = show ? '' : 'none';
+                        if (show) visible++;
+                    });
+                    const summary = document.getElementById('upcomingSummary');
+                    if (filter && summary) {
+                        summary.textContent = visible + ' of ' + items.length + ' recordings match filter';
+                    }
+                },
+                
+                async testSubscription() {
+                    const name = document.getElementById('subName').value;
+                    const type = parseInt(document.getElementById('subType').value);
+                    const pattern = document.getElementById('subPattern').value || name;
+                    const resultsDiv = document.getElementById('testMatchResults');
+                    
+                    if (!name) {
+                        Dashboard.alert('Enter a subscription name first');
+                        return;
+                    }
+                    
+                    resultsDiv.style.display = 'block';
+                    resultsDiv.innerHTML = '<span style="color: #2196f3;">Testing against current EPG...</span>';
+                    
+                    try {
+                        const result = await ApiClient.ajax({
+                            url: this.getApiUrl('Subscriptions/Test'),
+                            type: 'POST',
+                            contentType: 'application/json',
+                            data: JSON.stringify({
+                                Name: name,
+                                Type: type,
+                                MatchPattern: pattern
+                            }),
+                            dataType: 'json'
+                        });
+                        
+                        const matches = result.Matches || [];
+                        if (matches.length === 0) {
+                            resultsDiv.innerHTML = '<div style="color: #ff9800;">No matches found in the current EPG for "' + this.escapeHtml(name) + '". This subscription would not record anything right now.</div>' +
+                                '<div style="margin-top: 0.5em; font-size: 0.85em; opacity: 0.7;">Tip: Check that your Teamarr template includes this team/league in the title, subtitle, or categories.</div>';
+                        } else {
+                            let html = '<div style="color: #4caf50; margin-bottom: 0.5em;"><strong>' + matches.length + ' match' + (matches.length > 1 ? 'es' : '') + ' found</strong></div>';
+                            html += '<table style="width: 100%; font-size: 0.9em; border-collapse: collapse;">';
+                            html += '<tr style="border-bottom: 1px solid rgba(255,255,255,0.1);"><th style="text-align: left; padding: 4px;">Program</th><th style="text-align: left; padding: 4px;">Channel</th><th style="text-align: left; padding: 4px;">Start</th><th style="text-align: left; padding: 4px;">Score</th></tr>';
+                            matches.forEach(m => {
+                                var startTime = m.StartDate ? new Date(m.StartDate).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '';
+                                var scoreColor = (m.Score || 0) >= 50 ? '#4caf50' : (m.Score || 0) >= 30 ? '#ff9800' : '#f44336';
+                                html += '<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">';
+                                html += '<td style="padding: 4px;">' + this.escapeHtml(m.Name || '') + (m.EpisodeTitle ? '<br><span style="opacity: 0.7; font-size: 0.85em;">' + this.escapeHtml(m.EpisodeTitle) + '</span>' : '') + '</td>';
+                                html += '<td style="padding: 4px;">' + this.escapeHtml(m.ChannelName || '') + '</td>';
+                                html += '<td style="padding: 4px;">' + startTime + '</td>';
+                                html += '<td style="padding: 4px; color: ' + scoreColor + ';">' + (m.Score || 0) + '</td>';
+                                html += '</tr>';
+                            });
+                            html += '</table>';
+                            resultsDiv.innerHTML = html;
+                        }
+                    } catch (e) {
+                        console.error('Test failed:', e);
+                        resultsDiv.innerHTML = '<span style="color: #f44336;">Test failed: ' + (e.message || 'Unknown error') + '</span>';
+                    }
+                },
+                
                 async scanNow() {
                     const btn = document.getElementById('scanNowBtn');
                     const status = document.getElementById('actionStatus');
@@ -1226,15 +1428,24 @@
                             
                             // Determine badge color by league
                             const leagueColors = {
-                                'NBA': '#c9082a',
-                                'NFL': '#013369',
+                                'NBA': '#c9082a', 'WNBA': '#ff6b00',
+                                'NFL': '#013369', 'CFL': '#003087',
                                 'MLB': '#002d72',
                                 'NHL': '#000000',
-                                'EPL': '#3d195b',
-                                'SerieA': '#008fd7',
-                                'LaLiga': '#ee8707',
+                                'MLS': '#4a2d8e',
+                                'EPL': '#3d195b', 'LaLiga': '#ee8707',
+                                'Bundesliga': '#d20515', 'SerieA': '#008fd7',
+                                'Ligue1': '#dae025', 'LigaMX': '#1b5e20',
                                 'Champions League': '#1a1a2e',
-                                'UFC': '#c9082a'
+                                'Europa League': '#f57c00',
+                                'Conference League': '#00c853',
+                                'NCAA': '#004d40',
+                                'UFC': '#c9082a', 'Boxing': '#b71c1c',
+                                'F1': '#e10600', 'NASCAR': '#ffd600',
+                                'Golf': '#2e7d32', 'Tennis': '#c0ca33',
+                                'Olympics': '#0085c7',
+                                'World Cup': '#326295',
+                                'Soccer': '#4caf50'
                             };
                             const badgeColor = leagueColors[rec.League] || 'rgba(255,255,255,0.2)';
                             
@@ -1244,7 +1455,7 @@
                                 title = rec.Team1 + ' vs ' + rec.Team2;
                             }
                             
-                            html += '<div class="listItem listItem-border">' +
+                            html += '<div class="listItem listItem-border upcoming-item">' +
                                 '<div style="width: 60px; text-align: center; color: #888; font-size: 0.9em;">' + timeStr + '</div>' +
                                 '<div class="listItemBody two-line" style="flex: 1;">' +
                                 '<div class="listItemBodyText">' + this.escapeHtml(title) + '</div>' +

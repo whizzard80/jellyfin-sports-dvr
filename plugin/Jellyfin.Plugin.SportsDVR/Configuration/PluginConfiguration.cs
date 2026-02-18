@@ -20,7 +20,7 @@ public class PluginConfiguration : BasePluginConfiguration
         CustomAliases = new List<CustomTeamAlias>();
         EnableAutoScheduling = true;
         EnableAliasMatching = true;
-        ScanIntervalMinutes = 5;
+        DailyScanTime = "10:00";
     }
 
     /// <summary>
@@ -36,9 +36,18 @@ public class PluginConfiguration : BasePluginConfiguration
     public bool EnableAutoScheduling { get; set; }
 
     /// <summary>
-    /// Gets or sets how often to scan EPG for matching programs (minutes).
+    /// Gets or sets the daily EPG scan time (24h format, e.g. "10:00").
+    /// The plugin scans the full EPG once at this time each day and builds
+    /// the optimized recording schedule for the next 24 hours.
+    /// A second scan runs at startup to catch any changes.
     /// </summary>
-    public int ScanIntervalMinutes { get; set; }
+    public string DailyScanTime { get; set; } = "10:00";
+
+    /// <summary>
+    /// Gets or sets how often to scan EPG for matching programs (minutes).
+    /// Kept for backward compatibility — ignored when DailyScanTime is set.
+    /// </summary>
+    public int ScanIntervalMinutes { get; set; } = 30;
 
     /// <summary>
     /// Gets or sets the list of subscriptions.

@@ -88,8 +88,10 @@ public class RecordingScheduler
     }
 
     /// <summary>
-    /// Cancels all Jellyfin DVR timers that were created by Sports DVR subscriptions.
-    /// Identifies our timers by checking if the timer's program title matches any active subscription.
+    /// Cancels all Jellyfin DVR timers that match any active subscription.
+    /// Uses the sports scorer to identify sports content, then checks subscription matching.
+    /// This is aggressive but correct for a daily full rebuild — we wipe everything we'd record
+    /// and rebuild from scratch with fresh EPG data.
     /// </summary>
     public async Task<int> CancelSportsDvrTimersAsync(CancellationToken cancellationToken)
     {
@@ -99,27 +101,73 @@ public class RecordingScheduler
 
         foreach (var timer in timers)
         {
-            // Check if this timer matches any of our subscriptions
+            // Only consider future timers (don't cancel recordings already in progress)
+            if (timer.StartDate < DateTime.UtcNow) continue;
+
             var titleLower = timer.Name?.ToLowerInvariant() ?? string.Empty;
             var overviewLower = timer.Overview?.ToLowerInvariant() ?? string.Empty;
+            var combinedText = $"{titleLower} {overviewLower}";
 
             var isOurs = false;
 
-            // Check by overview containing "Subscription:" (our signature in BuildRecordingDescription)
+            // Check 1: Our signature in overview
             if (overviewLower.Contains("subscription:"))
             {
                 isOurs = true;
             }
-            else
+
+            // Check 2: Score it as sports — if it scores high AND matches a subscription, it's ours
+            if (!isOurs)
             {
-                // Fallback: check if title matches any subscription pattern
-                foreach (var sub in subscriptions)
+                var scored = _sportsScorer.Score(timer.Name ?? string.Empty, null, timer.Overview, false);
+                if (scored.Score >= SportsScorer.THRESHOLD_POSSIBLE_GAME)
                 {
-                    var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
-                    if (titleLower.Contains(pattern) || overviewLower.Contains(pattern))
+                    // Check against each subscription using the same logic as FindMatchingSubscription
+                    foreach (var sub in subscriptions)
                     {
-                        isOurs = true;
-                        break;
+                        var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
+
+                        switch (sub.Type)
+                        {
+                            case SubscriptionType.Team:
+                                var resolved = _aliasService.ResolveAlias(pattern).ToLowerInvariant();
+                                if (combinedText.Contains(resolved) || combinedText.Contains(pattern))
+                                {
+                                    isOurs = true;
+                                }
+                                break;
+
+                            case SubscriptionType.League:
+                                var words = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                                if (words.Length > 0 && words.All(w => ContainsWholeWord(combinedText, w)))
+                                {
+                                    isOurs = true;
+                                }
+                                if (!isOurs)
+                                {
+                                    var aliases = GetLeaguePatternAliases(pattern);
+                                    foreach (var alias in aliases)
+                                    {
+                                        if (alias == pattern) continue;
+                                        var aliasWords = alias.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                                        if (aliasWords.Length > 0 && aliasWords.All(w => ContainsWholeWord(combinedText, w)))
+                                        {
+                                            isOurs = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+
+                            case SubscriptionType.Event:
+                                if (combinedText.Contains(pattern))
+                                {
+                                    isOurs = true;
+                                }
+                                break;
+                        }
+
+                        if (isOurs) break;
                     }
                 }
             }
@@ -217,25 +265,17 @@ public class RecordingScheduler
                 ? Math.Min(Math.Max(config.MaxConcurrentRecordings, 1), 20)
                 : DEFAULT_MAX_CONCURRENT;
 
-            // Determine scan mode: full rebuild vs confirmation
-            var isFullScan = ShouldDoFullScan();
-
             _logger.LogInformation(
-                "{Mode} EPG scan for {Count} subscriptions (max {Max} concurrent, {Hours}h lookahead)",
-                isFullScan ? "FULL REBUILD" : "CONFIRMATION",
+                "FULL EPG scan for {Count} subscriptions (max {Max} concurrent, {Hours}h lookahead)",
                 subscriptions.Count,
                 maxConcurrent,
                 DEFAULT_LOOKAHEAD_HOURS);
 
-            if (isFullScan)
-            {
-                result = await FullScanAsync(subscriptions, maxConcurrent, cancellationToken).ConfigureAwait(false);
-                _lastFullRebuildAfterPurge = DateTime.UtcNow;
-            }
-            else
-            {
-                result = await ConfirmationScanAsync(subscriptions, maxConcurrent, cancellationToken).ConfigureAwait(false);
-            }
+            // Always do a full scan — wipe old timers and rebuild from scratch.
+            // Since we scan once daily (+ startup), every scan should build the
+            // complete optimized schedule from the full EPG.
+            result = await FullScanAsync(subscriptions, maxConcurrent, cancellationToken).ConfigureAwait(false);
+            _lastFullRebuildAfterPurge = DateTime.UtcNow;
         }
         catch (Exception ex)
         {
@@ -509,15 +549,55 @@ public class RecordingScheduler
                 program.Overview 
             }.Where(s => !string.IsNullOrEmpty(s)));
             
+            // Jellyfin may not set IsSports for all XMLTV programmes (e.g. <category>Soccer</category>).
+            // Treat as sports if IsSports is true OR genres look like sports.
+            // Includes both specific sports (Soccer, Basketball) and major events (Olympics, World Cup).
+            var hasSportsCategory = program.IsSports
+                || (program.Genres != null && program.Genres.Length > 0 && program.Genres.Any(g =>
+                    string.Equals(g, "Sports", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Soccer", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Basketball", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Football", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Hockey", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Baseball", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Tennis", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Golf", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Racing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Boxing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "MMA", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Wrestling", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Cricket", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Rugby", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Curling", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Skiing", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(g, "Figure Skating", StringComparison.OrdinalIgnoreCase)
+                    || (g != null && g.Contains("Sports", StringComparison.OrdinalIgnoreCase))
+                    || (g != null && g.Contains("Olympic", StringComparison.OrdinalIgnoreCase))
+                    || (g != null && g.Contains("World Cup", StringComparison.OrdinalIgnoreCase))));
+            
             var scored = _sportsScorer.Score(
                 program.Name ?? string.Empty,
                 program.ChannelName,
                 descWithEpisode,
-                program.IsSports);
+                hasSportsCategory);
 
+            // Trust Teamarr's <live/> tag: if a programme is marked live, let it through
+            // to subscription matching regardless of score. This handles events like the
+            // Olympics, World Cup, and other non-matchup formats that the scorer can't
+            // detect (no "Team A at Team B" pattern).
             if (scored.Score < SportsScorer.THRESHOLD_LIKELY_GAME)
             {
-                continue;
+                if (program.IsLive)
+                {
+                    _logger.LogDebug(
+                        "Low score {Score} for '{Title}' but has <live/> tag — bypassing scorer gate (genres=[{Genres}])",
+                        scored.Score, program.Name,
+                        string.Join(", ", program.Genres ?? Array.Empty<string>()));
+                }
+                else
+                {
+                    continue;
+                }
             }
             scoredCount++;
 
@@ -525,18 +605,18 @@ public class RecordingScheduler
             if (matchedSub == null)
             {
                 noSubCount++;
-                _logger.LogDebug(
-                    "No sub: '{Title}' | score={Score} | genres=[{Genres}] | episode='{Episode}' | isLive={IsLive}",
+                _logger.LogInformation(
+                    "NO MATCH: '{Title}' | score={Score} | genres=[{Genres}] | episode='{Episode}' | start={Start}",
                     program.Name, scored.Score,
                     string.Join(", ", program.Genres ?? Array.Empty<string>()),
-                    program.EpisodeTitle, program.IsLive);
+                    program.EpisodeTitle, program.StartDate.ToLocalTime().ToString("g"));
                 continue;
             }
 
             if (ShouldExclude(program, scored, matchedSub))
             {
                 excludedCount++;
-                _logger.LogDebug("Excluded: '{Title}' matched sub '{Sub}' but filtered out (isLive={IsLive}, isReplay={IsReplay})",
+                _logger.LogInformation("EXCLUDED: '{Title}' matched sub '{Sub}' but filtered out (isLive={IsLive}, isReplay={IsReplay})",
                     program.Name, matchedSub.Name, program.IsLive, scored.IsReplay);
                 continue;
             }
@@ -569,9 +649,10 @@ public class RecordingScheduler
 
         try
         {
-            // Get all Live TV channels
+            // Get all Live TV channels — use DtoOptions(true) to ensure all fields
+            // (Genres, IsLive, IsSports, etc.) are populated on returned BaseItem objects.
             var channelQuery = new LiveTvChannelQuery { };
-            var dtoOptions = new DtoOptions();
+            var dtoOptions = new DtoOptions(true);
             var channels = _liveTvManager.GetInternalChannels(channelQuery, dtoOptions, cancellationToken);
 
             _logger.LogDebug("Scanning {Count} Live TV channels", channels.Items.Count);
@@ -580,7 +661,8 @@ public class RecordingScheduler
             {
                 try
                 {
-                    // Get program guide for this channel
+                    // Only retrieve future programs — never schedule games already in progress.
+                    // We want full recordings from tip-off/kickoff, not partial mid-game joins.
                     var programQuery = new InternalItemsQuery
                     {
                         ChannelIds = new[] { channel.Id },
@@ -610,7 +692,7 @@ public class RecordingScheduler
                             EndDate = program.EndDate ?? startDate.AddHours(3),
                             IsSports = program.IsSports ?? false,
                             IsLive = program.IsLive ?? false,
-                            IsNew = program.IsNews ?? false,
+                            IsNew = program.IsNews ?? false, // Jellyfin 10.11 has IsNews, not IsNew
                             IsPremiere = program.IsPremiere ?? false,
                             IsRepeat = program.IsRepeat ?? false,
                             EpisodeTitle = program.EpisodeTitle,  // Teamarr stores league info here (e.g., "NBA")
@@ -658,8 +740,11 @@ public class RecordingScheduler
         var episodeTitle = program.EpisodeTitle?.ToLowerInvariant() ?? string.Empty;  // Teamarr league info
         var channelName = program.ChannelName?.ToLowerInvariant() ?? string.Empty;  // Teamarr matchup as channel name
         
-        // Include episode title and channel name for teamarr events which store league/matchup info there
-        var combinedText = $"{title} {description} {episodeTitle} {channelName}";
+        // Include episode title, channel name, and genres for matching.
+        // Genres are critical for event subscriptions (e.g., "Winter Olympics", "Olympics" 
+        // appear as <category> tags but may not be in the title/description).
+        var genresText = program.Genres != null ? string.Join(" ", program.Genres) : string.Empty;
+        var combinedText = $"{title} {description} {episodeTitle} {channelName} {genresText.ToLowerInvariant()}";
 
         foreach (var sub in subscriptions.OrderBy(s => s.SortOrder))
         {
@@ -715,26 +800,25 @@ public class RecordingScheduler
                         var genresLower = program.Genres?.Select(g => g.ToLowerInvariant()).ToArray() ?? Array.Empty<string>();
                         var leagueContext = $"{title} {episodeTitle} {string.Join(" ", genresLower)}";
                         
-                        // All significant words in pattern must appear in league context (AND logic)
-                        // e.g., "ncaa basketball" requires BOTH "ncaa" AND "basketball" to appear
-                        // This prevents "ncaa basketball" from matching "NCAA Baseball"
+                        // All significant words in pattern must appear as WHOLE WORDS in league context.
+                        // Uses \b word boundaries to prevent "ucl" matching inside "UCLA".
                         var patternWords = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                         if (patternWords.Length > 0 && patternWords.All(w =>
-                            leagueContext.Contains(w, StringComparison.OrdinalIgnoreCase)))
+                            ContainsWholeWord(leagueContext, w)))
                         {
                             isMatch = true;
                         }
                         
-                        // Try aliases with same AND logic
+                        // Try aliases with same whole-word AND logic
                         if (!isMatch)
                         {
                             var expandedPatterns = GetLeaguePatternAliases(pattern);
                             foreach (var alias in expandedPatterns)
                             {
-                                if (alias == pattern) continue; // Already checked above
+                                if (alias == pattern) continue;
                                 var aliasWords = alias.Split(' ', StringSplitOptions.RemoveEmptyEntries);
                                 if (aliasWords.Length > 0 && aliasWords.All(w =>
-                                    leagueContext.Contains(w, StringComparison.OrdinalIgnoreCase)))
+                                    ContainsWholeWord(leagueContext, w)))
                                 {
                                     isMatch = true;
                                     _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via alias '{Alias}'",
@@ -744,10 +828,25 @@ public class RecordingScheduler
                             }
                         }
                         
-                        // Also try full pattern as substring of leagueContext
+                        // Also try full pattern as whole-word match in leagueContext
                         if (!isMatch)
                         {
-                            isMatch = leagueContext.Contains(pattern, StringComparison.OrdinalIgnoreCase);
+                            isMatch = ContainsWholeWord(leagueContext, pattern);
+                        }
+                        
+                        // Exclude women's sports from men's league subscriptions.
+                        // "NCAA Basketball" or "College Basketball" should NOT match "Women's College Basketball".
+                        // If the user wants women's sports, they add a separate subscription.
+                        if (isMatch && IsWomensSport(title, episodeTitle))
+                        {
+                            var patLower = pattern.ToLowerInvariant();
+                            // Only exclude if the subscription is NOT explicitly for women's sports
+                            if (!patLower.Contains("women") && !patLower.Contains("wnba") && !patLower.Contains("ncaaw"))
+                            {
+                                _logger.LogDebug("Excluding '{Title}' from '{Sub}' — women's sport, subscription is not women-specific",
+                                    program.Name, sub.Name);
+                                isMatch = false;
+                            }
                         }
                     }
                     break;
@@ -847,19 +946,46 @@ public class RecordingScheduler
         }
 
         // Signal 3: Teamarr sets <category> tags (Genres) ONLY on live game programmes, not filler.
-        // If programme has sport-specific genres (Baseball, Basketball, Hockey, Soccer, etc.)
-        // AND a matchup pattern (at/vs/@) in the title, it's a live game broadcast.
         // This handles the case where Jellyfin's IsLive doesn't map from XMLTV <live/> tag.
+        //
+        // Two paths:
+        // 3a: Event-level genres (Olympics, World Cup) — these are live without needing a matchup pattern
+        // 3b: Sport-specific genres (Baseball, Basketball, etc.) + matchup pattern in title or subtitle
         if (program.Genres != null && program.Genres.Length > 0)
         {
+            // 3a: Event-level genres are strong enough on their own (no matchup needed)
+            var hasEventGenre = program.Genres.Any(g =>
+                (g != null && g.Contains("Olympic", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("World Cup", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("World Series", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("Super Bowl", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("Championship", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("All-Star", StringComparison.OrdinalIgnoreCase)) ||
+                (g != null && g.Contains("All Star", StringComparison.OrdinalIgnoreCase)));
+
+            if (hasEventGenre)
+            {
+                return true;
+            }
+
+            // 3b: Sport-specific genres + matchup pattern in title OR subtitle
             var hasRelevantGenre = program.Genres.Any(g =>
                 !string.Equals(g, "Sports", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(g, "Show", StringComparison.OrdinalIgnoreCase));
+                !string.Equals(g, "Show", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(g, "Sports Event", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(g, "Sporting Event", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(g, "Episode", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(g, "Series", StringComparison.OrdinalIgnoreCase));
 
             if (hasRelevantGenre || program.IsSports)
             {
-                // Has sport-specific category — check for matchup pattern in title
+                // Check for matchup pattern in title OR subtitle (EpisodeTitle)
                 if (MatchupPattern.IsMatch(title))
+                {
+                    return true;
+                }
+
+                if (!string.IsNullOrEmpty(program.EpisodeTitle) && MatchupPattern.IsMatch(program.EpisodeTitle))
                 {
                     return true;
                 }
@@ -871,7 +997,7 @@ public class RecordingScheduler
         return false;
     }
 
-    // Pattern for matchup indicators in title (vs/@/at between team names)
+    // Pattern for matchup indicators (vs/@/at between team names)
     private static readonly Regex MatchupPattern = new(
         @"\s+(vs\.?|v\.?|@|at)\s+",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -892,6 +1018,9 @@ public class RecordingScheduler
         // Get default timer settings from Jellyfin DVR
         var defaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
 
+        // Sport-specific post-padding — different sports have different overtime tendencies
+        var postPaddingSeconds = GetSportPostPadding(scored.DetectedLeague, program.Genres);
+
         // Create timer info - Jellyfin's DVR will handle the actual recording
         var timerInfo = new TimerInfoDto
         {
@@ -901,14 +1030,13 @@ public class RecordingScheduler
             ProgramId = program.Id,
             StartDate = program.StartDate,
             EndDate = program.EndDate,
-            ServiceName = program.ServiceName, // Required for Jellyfin to know which tuner to use
+            ServiceName = program.ServiceName,
             
-            // Use defaults but add extra padding for sports (games often run over)
             PrePaddingSeconds = defaults.PrePaddingSeconds,
-            PostPaddingSeconds = Math.Max(defaults.PostPaddingSeconds, 1800), // At least 30 min padding
+            PostPaddingSeconds = Math.Max(defaults.PostPaddingSeconds, postPaddingSeconds),
             
             IsPrePaddingRequired = defaults.IsPrePaddingRequired,
-            IsPostPaddingRequired = true, // Sports often run over
+            IsPostPaddingRequired = true,
             
             // Map SortOrder (0=highest) to Jellyfin priority (higher number = higher priority)
             Priority = Math.Max(1, 100 - subscription.SortOrder)
@@ -952,6 +1080,59 @@ public class RecordingScheduler
     }
 
     /// <summary>
+    /// Returns sport-specific post-padding in seconds. Different sports have vastly 
+    /// different overtime tendencies — baseball extras can add 60+ min, while soccer
+    /// rarely exceeds 15 min of stoppage time.
+    /// </summary>
+    private static int GetSportPostPadding(string? detectedLeague, string[]? genres)
+    {
+        var league = detectedLeague?.ToUpperInvariant() ?? string.Empty;
+        var genreSet = genres?.Select(g => g.ToLowerInvariant()).ToHashSet() ?? new HashSet<string>();
+
+        // Baseball — no clock, extra innings can add 60+ minutes
+        if (league is "MLB" or "NCAA" && genreSet.Contains("baseball"))
+            return 3600; // 60 min
+        if (genreSet.Contains("baseball") || genreSet.Contains("softball"))
+            return 3600;
+
+        // Football — overtime + commercial breaks, frequently runs 30-45 min over
+        if (league is "NFL" or "NCAA" && (genreSet.Contains("football") || genreSet.Contains("college football")))
+            return 2700; // 45 min
+        if (league == "CFL" || league == "XFL")
+            return 2700;
+
+        // Basketball — timeouts + overtime, usually 15-30 min over
+        if (league is "NBA" or "WNBA" or "NCAA" && genreSet.Contains("basketball"))
+            return 1800; // 30 min
+
+        // Hockey — overtime + shootout, typically 20-30 min extra
+        if (league == "NHL")
+            return 1800; // 30 min
+
+        // Soccer — very predictable, 10-15 min stoppage + penalty shootouts
+        if (league is "EPL" or "LALIGA" or "BUNDESLIGA" or "SERIEA" or "LIGUE1" or "MLS"
+            or "LIGAMX" or "CHAMPIONS LEAGUE" or "EUROPA LEAGUE" or "CONFERENCE LEAGUE")
+            return 1800; // 30 min (penalties can add up)
+        if (genreSet.Contains("soccer"))
+            return 1800;
+
+        // UFC/Boxing/MMA — fights can end early or go to decision
+        if (league is "UFC" or "MMA" or "BOXING")
+            return 1800; // 30 min
+
+        // Golf/Tennis — highly variable, but EPG usually schedules generously
+        if (league is "GOLF" or "TENNIS")
+            return 1800; // 30 min
+
+        // Motorsport — usually finishes close to scheduled time  
+        if (league is "F1" or "NASCAR" or "INDYCAR")
+            return 1800; // 30 min (weather delays)
+
+        // Default: 30 minutes (good general safety margin for any sport)
+        return 1800;
+    }
+
+    /// <summary>
     /// Builds a dedup key from program name, channel, and start time so we don't create
     /// duplicate timers when program IDs change across EPG refreshes or when scans run multiple times.
     /// </summary>
@@ -962,6 +1143,24 @@ public class RecordingScheduler
         var roundedTime = new DateTime(startDate.Year, startDate.Month, startDate.Day,
             startDate.Hour, startDate.Minute, 0, DateTimeKind.Utc);
         return $"{normalizedName}|{channel}|{roundedTime:yyyyMMddHHmm}";
+    }
+
+    /// <summary>
+    /// Checks if a word appears as a whole word in text (not as a substring of another word).
+    /// Prevents "ucl" from matching "UCLA", "mls" from matching "htmls", etc.
+    /// </summary>
+    private static bool ContainsWholeWord(string text, string word)
+    {
+        return Regex.IsMatch(text, @"\b" + Regex.Escape(word) + @"\b", RegexOptions.IgnoreCase);
+    }
+
+    /// <summary>
+    /// Detects women's sports programs from title/episode clues.
+    /// </summary>
+    private static bool IsWomensSport(string title, string? episodeTitle)
+    {
+        var combined = $"{title} {episodeTitle ?? ""}";
+        return Regex.IsMatch(combined, @"\bwomen'?s?\b|\bWNBA\b|\bNCAA\s*W\b|\bWPS\b|\bNWSL\b|\bW\.\s*Basketball\b", RegexOptions.IgnoreCase);
     }
 
     private static bool IsRegexPattern(string pattern)
@@ -994,27 +1193,6 @@ public class RecordingScheduler
         }
     }
     
-    private static bool MatchesWithWordBoundary(string text, string pattern)
-    {
-        // For leagues like "Premier League", ensure we match at word boundaries
-        // This prevents "premier league" from matching "Afghanistan Premier League"
-        try
-        {
-            // Check if pattern appears at the start, or preceded by non-word char
-            var escapedPattern = Regex.Escape(pattern);
-            
-            // Match pattern that starts the text, or is preceded by start/colon/space
-            // and is followed by end/colon/space/dash
-            var wordBoundaryPattern = $@"(?:^|[:\s])({escapedPattern})(?:[:\s\-]|$)";
-            
-            return Regex.IsMatch(text, wordBoundaryPattern, RegexOptions.IgnoreCase);
-        }
-        catch
-        {
-            // Fallback to simple contains
-            return text.Contains(pattern, StringComparison.OrdinalIgnoreCase);
-        }
-    }
     
     /// <summary>
     /// Get sport-specific aliases for league patterns.
@@ -1110,11 +1288,93 @@ public class RecordingScheduler
             aliases.Add("ncaam");
         }
         
-        // Champions League
+        // Champions League / UCL / UEFA (bidirectional)
         if (patternLower.Contains("champions league"))
         {
             aliases.Add("ucl");
             aliases.Add("uefa champions league");
+            aliases.Add("uefa champions league soccer");
+        }
+        else if (patternLower == "ucl")
+        {
+            aliases.Add("uefa champions league");
+            aliases.Add("champions league");
+            aliases.Add("uefa champions league soccer");
+        }
+        else if (patternLower == "uefa")
+        {
+            aliases.Add("uefa champions league");
+            aliases.Add("uefa europa league");
+        }
+        
+        // Europa League
+        if (patternLower.Contains("europa league") && !patternLower.Contains("conference"))
+        {
+            aliases.Add("uefa europa league");
+            aliases.Add("europa league soccer");
+            aliases.Add("uefa europa league soccer");
+        }
+        
+        // Conference League
+        if (patternLower.Contains("conference league"))
+        {
+            aliases.Add("europa conference league");
+            aliases.Add("uefa europa conference league");
+        }
+        
+        // La Liga / Spanish
+        if (patternLower == "la liga")
+        {
+            aliases.Add("spanish la liga");
+            aliases.Add("la liga soccer");
+        }
+        
+        // Bundesliga / German
+        if (patternLower == "bundesliga")
+        {
+            aliases.Add("german bundesliga");
+            aliases.Add("bundesliga soccer");
+        }
+        
+        // Ligue 1 / French
+        if (patternLower == "ligue 1")
+        {
+            aliases.Add("french ligue 1");
+            aliases.Add("ligue 1 soccer");
+        }
+        
+        // Liga MX / Mexican
+        if (patternLower == "liga mx")
+        {
+            aliases.Add("mexican liga mx");
+            aliases.Add("liga mx soccer");
+        }
+        
+        // MLS
+        if (patternLower == "mls")
+        {
+            aliases.Add("major league soccer");
+            aliases.Add("mls soccer");
+        }
+        else if (patternLower == "major league soccer")
+        {
+            aliases.Add("mls");
+            aliases.Add("mls soccer");
+        }
+        
+        // WNBA
+        if (patternLower == "wnba")
+        {
+            aliases.Add("wnba basketball");
+            aliases.Add("women's nba");
+        }
+        
+        // World Cup
+        if (patternLower.Contains("world cup"))
+        {
+            aliases.Add("fifa world cup");
+            aliases.Add("world cup qualifier");
+            aliases.Add("world cup soccer");
         }
         
         return aliases.Distinct();

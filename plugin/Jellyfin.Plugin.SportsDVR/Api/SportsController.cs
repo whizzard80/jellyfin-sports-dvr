@@ -265,7 +265,7 @@ public class SportsController : ControllerBase
             EnabledSubscriptions = subscriptions.Count(s => s.Enabled),
             MaxConcurrentRecordings = config?.MaxConcurrentRecordings ?? 2,
             AutoSchedulingEnabled = config?.EnableAutoScheduling ?? true,
-            ScanIntervalMinutes = config?.ScanIntervalMinutes ?? 5
+            DailyScanTime = config?.DailyScanTime ?? "10:00"
         });
     }
 
@@ -358,9 +358,18 @@ public class SportsController : ControllerBase
             response.TotalScheduled = response.Scheduled.Count;
             response.Upcoming48h = count48h;
             
-            // Calculate next scan time
-            var scanInterval = config?.ScanIntervalMinutes ?? 5;
-            response.NextScanTime = now.AddMinutes(scanInterval);
+            // Calculate next daily scan time
+            var scanTimeStr = config?.DailyScanTime ?? "10:00";
+            var parts = scanTimeStr.Split(':');
+            int scanHour = 10, scanMinute = 0;
+            if (parts.Length >= 2 && int.TryParse(parts[0], out var h) && int.TryParse(parts[1], out var m))
+            {
+                scanHour = Math.Clamp(h, 0, 23);
+                scanMinute = Math.Clamp(m, 0, 59);
+            }
+            var nextScan = now.Date.AddHours(scanHour).AddMinutes(scanMinute);
+            if (nextScan <= now) nextScan = nextScan.AddDays(1);
+            response.NextScanTime = nextScan;
 
             _logger.LogInformation("Returning {Count} upcoming recordings ({Count48h} in next 48h)", response.TotalScheduled, count48h);
         }
@@ -827,6 +836,91 @@ public class SportsController : ControllerBase
     }
 
     /// <summary>
+    /// Test a single subscription against the current EPG. Used by the config UI "Test Match" button.
+    /// Returns matching programs with score, channel, and time information.
+    /// </summary>
+    [HttpPost("Subscriptions/Test")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult> TestSingleSubscription([FromBody] TestSubscriptionRequest request)
+    {
+        try
+        {
+            var channelQuery = new LiveTvChannelQuery { };
+            var dtoOptions = new DtoOptions(true);
+            var channels = _liveTvManager.GetInternalChannels(channelQuery, dtoOptions, CancellationToken.None);
+            var now = DateTime.UtcNow;
+            var endDate = now.AddHours(72);
+            var matches = new List<object>();
+            var pattern = (request.MatchPattern ?? request.Name ?? "").ToLowerInvariant();
+
+            foreach (var channel in channels.Items)
+            {
+                try
+                {
+                    var programQuery = new InternalItemsQuery
+                    {
+                        ChannelIds = new[] { channel.Id },
+                        MinStartDate = now,
+                        MaxStartDate = endDate
+                    };
+
+                    var programs = await _liveTvManager.GetPrograms(programQuery, dtoOptions, CancellationToken.None).ConfigureAwait(false);
+                    
+                    foreach (var program in programs.Items)
+                    {
+                        var title = program.Name ?? "";
+                        var episodeTitle = program.EpisodeTitle ?? "";
+                        var genres = program.Genres ?? Array.Empty<string>();
+                        var desc = program.Overview ?? "";
+                        var searchText = $"{title} {episodeTitle} {desc} {channel.Name} {string.Join(" ", genres)}".ToLowerInvariant();
+                        
+                        if (searchText.Contains(pattern))
+                        {
+                            // Score it
+                            var hasSportsCategory = (program.IsSports ?? false) ||
+                                genres.Any(g => g.Contains("Sports", StringComparison.OrdinalIgnoreCase) ||
+                                    g.Contains("Soccer", StringComparison.OrdinalIgnoreCase) ||
+                                    g.Contains("Basketball", StringComparison.OrdinalIgnoreCase) ||
+                                    g.Contains("Football", StringComparison.OrdinalIgnoreCase) ||
+                                    g.Contains("Hockey", StringComparison.OrdinalIgnoreCase) ||
+                                    g.Contains("Baseball", StringComparison.OrdinalIgnoreCase));
+                            var descWithEpisode = string.Join(" ", new[] { episodeTitle, desc }.Where(s => !string.IsNullOrEmpty(s)));
+                            var scored = _sportsScorer.Score(title, channel.Name, descWithEpisode, hasSportsCategory);
+                            
+                            matches.Add(new
+                            {
+                                Name = title,
+                                EpisodeTitle = episodeTitle,
+                                ChannelName = channel.Name ?? "Unknown",
+                                StartDate = program.StartDate,
+                                EndDate = program.EndDate,
+                                Score = scored.Score,
+                                Genres = genres,
+                                IsLive = program.IsLive ?? false,
+                                DetectedLeague = scored.DetectedLeague
+                            });
+                        }
+                    }
+                }
+                catch { /* skip failed channels */ }
+            }
+
+            // Sort by start date, limit to 50 results
+            var sortedMatches = matches
+                .OrderBy(m => ((dynamic)m).StartDate ?? DateTime.MaxValue)
+                .Take(50)
+                .ToList();
+
+            return Ok(new { Matches = sortedMatches, Pattern = pattern });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to test subscription");
+            return Ok(new { Matches = Array.Empty<object>(), Error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Builds a regex from a pattern (handles simple patterns and regex).
     /// </summary>
     private static Regex BuildPatternRegex(string pattern)
@@ -1093,9 +1187,9 @@ public class StatusResponse
     public bool AutoSchedulingEnabled { get; set; }
 
     /// <summary>
-    /// Gets or sets the EPG scan interval in minutes.
+    /// Gets or sets the daily EPG scan time.
     /// </summary>
-    public int ScanIntervalMinutes { get; set; }
+    public string DailyScanTime { get; set; } = "10:00";
 }
 
 /// <summary>
@@ -1326,4 +1420,19 @@ public class SubscriptionMatchResult
     
     /// <summary>Sample matching titles.</summary>
     public List<string> SampleMatches { get; set; } = new();
+}
+
+/// <summary>
+/// Request for testing a single subscription against the EPG.
+/// </summary>
+public class TestSubscriptionRequest
+{
+    /// <summary>Subscription name.</summary>
+    public string Name { get; set; } = string.Empty;
+    
+    /// <summary>Subscription type (0=Team, 1=League, 2=Event).</summary>
+    public int Type { get; set; }
+    
+    /// <summary>Match pattern (defaults to Name if empty).</summary>
+    public string? MatchPattern { get; set; }
 }

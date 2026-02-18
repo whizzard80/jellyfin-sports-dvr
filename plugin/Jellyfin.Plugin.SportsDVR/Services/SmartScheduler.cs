@@ -8,11 +8,24 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.SportsDVR.Services;
 
 /// <summary>
-/// Smart scheduler that optimizes recording schedules based on:
-/// - Connection limits (e.g., 2 concurrent streams)
-/// - Subscription priorities
-/// - Duplicate game detection (same game on multiple channels)
-/// - Time slot conflicts
+/// Smart scheduler that builds an optimized recording schedule.
+/// 
+/// Algorithm: Priority-tier maximization.
+///
+/// 1. Deduplicate games (same matchup on multiple channels → pick best channel).
+/// 2. Group games into PRIORITY TIERS — one tier per subscription.
+///    Within a tier, all games are equally important.
+/// 3. Process tiers from highest to lowest priority. For each tier:
+///    a. Find which time slots are still available (respecting maxConcurrent).
+///    b. Use interval scheduling (earliest-end-first) to MAXIMIZE the number
+///       of games from this tier that fit into the remaining slots.
+/// 4. Higher-priority tiers always get first pick. Lower-priority tiers fill gaps.
+///
+/// This means: if you have Champions League at #3 and NCAA Basketball at #14,
+/// all possible Champions League games are placed first. Then NCAA Basketball
+/// games fill whatever slots remain — and within that tier, the scheduler
+/// maximizes coverage by preferring games that end earliest (opening slots
+/// for later games).
 /// </summary>
 public class SmartScheduler
 {
@@ -31,10 +44,6 @@ public class SmartScheduler
     /// <summary>
     /// Creates an optimized recording schedule from matched programs.
     /// </summary>
-    /// <param name="matches">All programs that match subscriptions.</param>
-    /// <param name="maxConcurrent">Maximum concurrent recordings (connection limit).</param>
-    /// <param name="existingSlots">Optional: time windows of already-scheduled timers to avoid overfilling concurrent slots.</param>
-    /// <returns>Optimized list of programs to record.</returns>
     public List<ScheduledRecording> CreateSchedule(
         List<MatchedProgram> matches,
         int maxConcurrent,
@@ -46,36 +55,158 @@ public class SmartScheduler
         }
 
         _logger.LogInformation(
-            "Creating optimized schedule from {Count} matched programs with {Max} max concurrent ({Existing} existing timers)",
+            "Building optimized schedule: {Count} matched programs, {Max} max concurrent, {Existing} existing timers",
             matches.Count,
             maxConcurrent,
             existingSlots?.Count ?? 0);
 
-        // Step 1: Detect and group duplicate broadcasts (same game on multiple channels)
+        // Step 1: Deduplicate — same game on multiple channels → single GameGroup
         var uniqueGames = DeduplicateGames(matches);
         _logger.LogInformation("After deduplication: {Count} unique games (from {Total} matches)", uniqueGames.Count, matches.Count);
-        if (matches.Count > 3 && uniqueGames.Count == 1)
-        {
-            _logger.LogWarning(
-                "Deduplication collapsed {MatchCount} matches into 1 game. If these were different games, check EPG titles have team names or vs/@/at (e.g. 'Celtics at Lakers').",
-                matches.Count);
-        }
 
-        // Step 2: Sort by priority (highest first) then by start time
-        var sortedGames = uniqueGames
-            .OrderByDescending(g => g.EffectivePriority)
-            .ThenBy(g => g.Primary.Program.StartDate)
+        // Step 2: Group into priority tiers by subscription SortOrder.
+        // Each subscription is its own tier. Games from the same subscription compete
+        // only against each other for "which ones maximize coverage."
+        var tiers = uniqueGames
+            .GroupBy(g => g.Primary.Subscription.SortOrder)
+            .OrderBy(g => g.Key) // SortOrder 0 = highest priority
+            .Select(g => new PriorityTier
+            {
+                SortOrder = g.Key,
+                SubscriptionName = g.First().Primary.Subscription.Name,
+                SubscriptionType = g.First().Primary.Subscription.Type,
+                Games = g.ToList()
+            })
             .ToList();
 
-        // Step 3: Build schedule respecting connection limits (including existing timers)
-        var schedule = BuildSchedule(sortedGames, maxConcurrent, existingSlots);
+        _logger.LogInformation("Organized into {Count} priority tiers:", tiers.Count);
+        foreach (var tier in tiers)
+        {
+            _logger.LogInformation(
+                "  Tier #{Sort}: {SubName} ({Type}) — {Count} games",
+                tier.SortOrder + 1,
+                tier.SubscriptionName,
+                tier.SubscriptionType,
+                tier.Games.Count);
+        }
 
-        _logger.LogInformation(
-            "Final schedule: {Scheduled} recordings from {Total} unique games",
-            schedule.Count,
-            uniqueGames.Count);
+        // Step 3: Build schedule tier by tier
+        var schedule = BuildScheduleByTiers(tiers, maxConcurrent, existingSlots);
+
+        // Step 4: Log the final schedule
+        _logger.LogInformation("--- FINAL RECORDING SCHEDULE ({Count} recordings) ---", schedule.Count);
+        foreach (var rec in schedule.OrderBy(r => r.StartTime))
+        {
+            _logger.LogInformation(
+                "  {Start} - {End} | {Title} | priority #{SortOrder} ({SubName})",
+                rec.StartTime.ToLocalTime().ToString("g"),
+                rec.EndTime.ToLocalTime().ToString("g"),
+                rec.Title,
+                rec.Match.Subscription.SortOrder + 1,
+                rec.Match.Subscription.Name);
+        }
+
+        var skippedCount = uniqueGames.Count - schedule.Count;
+        if (skippedCount > 0)
+        {
+            _logger.LogInformation("  ({Skipped} games could not fit due to concurrent stream limits)", skippedCount);
+        }
 
         return schedule;
+    }
+
+    /// <summary>
+    /// Builds the schedule tier by tier.
+    /// For each tier, uses interval scheduling to maximize the number of recordings
+    /// that fit into the remaining available slots.
+    /// </summary>
+    private List<ScheduledRecording> BuildScheduleByTiers(
+        List<PriorityTier> tiers,
+        int maxConcurrent,
+        List<(DateTime Start, DateTime End)>? existingSlots)
+    {
+        var schedule = new List<ScheduledRecording>();
+
+        // Committed time slots — starts with any existing timers from previous scans
+        var committedSlots = existingSlots?.ToList() ?? new List<(DateTime Start, DateTime End)>();
+
+        foreach (var tier in tiers)
+        {
+            // Sort this tier's games by end time (earliest-ending first).
+            // This is the classic interval scheduling greedy algorithm:
+            // by always picking the game that ends soonest, we leave the most
+            // room for subsequent games. This maximizes total recordings.
+            var candidates = tier.Games
+                .OrderBy(g => g.Primary.Program.EndDate)
+                .ThenBy(g => g.Primary.Program.StartDate)
+                .ToList();
+
+            var scheduledFromTier = 0;
+            var skippedFromTier = 0;
+
+            foreach (var game in candidates)
+            {
+                var program = game.Primary.Program;
+                var startTime = program.StartDate;
+                var endTime = program.EndDate;
+
+                // Count how many committed slots overlap this game's window
+                var overlapping = committedSlots
+                    .Count(s => s.Start < endTime && s.End > startTime);
+
+                if (overlapping < maxConcurrent)
+                {
+                    // Slot available — schedule it
+                    var rec = CreateRecording(game);
+                    schedule.Add(rec);
+                    committedSlots.Add((startTime, endTime));
+                    scheduledFromTier++;
+
+                    _logger.LogDebug(
+                        "  Tier #{Sort} scheduled: '{Title}' {Start}-{End} ({Concurrent}/{Max} concurrent)",
+                        tier.SortOrder + 1,
+                        program.Name,
+                        startTime.ToLocalTime().ToString("g"),
+                        endTime.ToLocalTime().ToString("g"),
+                        overlapping + 1,
+                        maxConcurrent);
+                }
+                else
+                {
+                    skippedFromTier++;
+                }
+            }
+
+            if (scheduledFromTier > 0 || skippedFromTier > 0)
+            {
+                _logger.LogInformation(
+                    "Tier #{Sort} ({SubName}): scheduled {Scheduled} of {Total} games{Skipped}",
+                    tier.SortOrder + 1,
+                    tier.SubscriptionName,
+                    scheduledFromTier,
+                    candidates.Count,
+                    skippedFromTier > 0 ? $" ({skippedFromTier} couldn't fit)" : "");
+            }
+        }
+
+        return schedule;
+    }
+
+    private static ScheduledRecording CreateRecording(GameGroup game)
+    {
+        var program = game.Primary.Program;
+        return new ScheduledRecording
+        {
+            GameGroup = game,
+            Program = program,
+            Match = game.Primary,
+            Title = program.Name ?? "Unknown",
+            StartTime = program.StartDate,
+            EndTime = program.EndDate,
+            Priority = game.EffectivePriority,
+            ChannelName = program.ChannelName ?? "Unknown",
+            HasBackupChannels = game.Alternates.Count > 0
+        };
     }
 
     /// <summary>
@@ -87,12 +218,10 @@ public class SmartScheduler
 
         foreach (var match in matches)
         {
-            // Try to find an existing group for this game
             var existingGroup = groups.FirstOrDefault(g => IsSameGame(g.Primary, match));
 
             if (existingGroup != null)
             {
-                // Add as alternate channel
                 existingGroup.Alternates.Add(match);
                 _logger.LogDebug(
                     "Added alternate channel for '{Game}': {Channel}",
@@ -101,7 +230,6 @@ public class SmartScheduler
             }
             else
             {
-                // Create new group
                 groups.Add(new GameGroup
                 {
                     Primary = match,
@@ -118,8 +246,6 @@ public class SmartScheduler
                 var allOptions = new List<MatchedProgram> { group.Primary };
                 allOptions.AddRange(group.Alternates);
 
-                // Pick best channel: prefer earliest start (live > replay),
-                // then sports channels, then subscription sort order (lower = higher priority)
                 var best = allOptions
                     .OrderBy(m => m.Program.StartDate)
                     .ThenByDescending(m => m.Scored.IsSportsChannel ? 1 : 0)
@@ -146,24 +272,16 @@ public class SmartScheduler
 
     /// <summary>
     /// Determines if two programs are the same game on different channels.
-    /// For team sports: same teams within 24 hours = same game (later airing is a replay).
-    /// For non-team events: uses title similarity within a shorter window.
     /// </summary>
     private bool IsSameGame(MatchedProgram a, MatchedProgram b)
     {
-        // Check if same teams first (most reliable)
         var teamsA = GetNormalizedTeams(a);
         var teamsB = GetNormalizedTeams(b);
 
         if (teamsA.Count >= 2 && teamsB.Count >= 2)
         {
-            // Both have two teams - check if same matchup
             if (teamsA.SetEquals(teamsB))
             {
-                // Same teams within 15 hours = same game.
-                // This catches simultaneous broadcasts on different channels
-                // AND replays/rebroadcasts later the same day, while avoiding
-                // false positives for back-to-back days (e.g., 7 PM → 2 PM next day = 19h).
                 var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
                 if (timeDiff <= 15)
                 {
@@ -173,19 +291,16 @@ public class SmartScheduler
                     return true;
                 }
             }
-            // Different teams = different game
             return false;
         }
 
-        // Try to extract teams from title if ScoredProgram didn't have them
         var extractedTeamsA = ExtractTeamsFromTitle(a.Program.Name ?? "");
         var extractedTeamsB = ExtractTeamsFromTitle(b.Program.Name ?? "");
-        
+
         if (extractedTeamsA.Count >= 2 && extractedTeamsB.Count >= 2)
         {
             if (TeamsMatch(extractedTeamsA, extractedTeamsB))
             {
-                // Same teams within 15 hours = same game
                 var timeDiff = Math.Abs((a.Program.StartDate - b.Program.StartDate).TotalHours);
                 if (timeDiff <= 15)
                 {
@@ -198,12 +313,9 @@ public class SmartScheduler
             return false;
         }
 
-        // Fall back to title similarity only for non-team events (e.g. UFC Main Card).
-        // Use a TIGHT time window (30 min) so we only merge same broadcast on different channels,
-        // not different games that share a generic title (e.g. "Live NBA Basketball" at 7pm and 10pm).
         var titleA = NormalizeTitle(a.Program.Name ?? "");
         var titleB = NormalizeTitle(b.Program.Name ?? "");
-        
+
         var similarity = CalculateSimilarity(titleA, titleB);
         if (similarity > 0.8)
         {
@@ -220,17 +332,11 @@ public class SmartScheduler
         return false;
     }
 
-    /// <summary>
-    /// Extracts team names from a title using common patterns.
-    /// </summary>
     private static List<string> ExtractTeamsFromTitle(string title)
     {
         var teams = new List<string>();
-        
-        // Remove ALL common prefixes and noise (may be multiple: "Live: NBA: ...")
         var cleaned = title;
-        
-        // Patterns to remove from ANYWHERE (not just start)
+
         var noisePatterns = new[] {
             @"\blive\s*[:\-]?\s*",
             @"\bnew\s*[:\-]?\s*",
@@ -241,30 +347,28 @@ public class SmartScheduler
             @"\bpl\s*[:\-]?\s*",
             @"\bserie\s*a\s*[:\-]?\s*",
             @"\bmma\s*[:\-]?\s*",
-            @"\bufc\s+\d+\s*[:\-]?\s*",       // UFC 325:
-            @"\bcarabao\s*[:\-]?\s*",          // Carabao
-            @"\bfa\s*cup\s*[:\-]?\s*",         // FA Cup
-            @"\d{2}/\d{2}\s*[:\-]?\s*",        // 25/26:
-            @"\bsf\d+\s*",                     // SF1, SF2 (semifinal)
-            @"\bmw\d+\s*[:\-]?\s*",            // MW24: (matchweek)
+            @"\bufc\s+\d+\s*[:\-]?\s*",
+            @"\bcarabao\s*[:\-]?\s*",
+            @"\bfa\s*cup\s*[:\-]?\s*",
+            @"\d{2}/\d{2}\s*[:\-]?\s*",
+            @"\bsf\d+\s*",
+            @"\bmw\d+\s*[:\-]?\s*",
         };
-        
+
         foreach (var pattern in noisePatterns)
         {
             cleaned = Regex.Replace(cleaned, pattern, "", RegexOptions.IgnoreCase);
         }
-        
+
         cleaned = cleaned.Trim();
-        
-        // Match "Team1 vs/v/@/at Team2"
+
         var match = Regex.Match(cleaned, @"(.+?)\s+(?:vs\.?|v\.?|@|at)\s+(.+?)(?:\s*[;\(\[]|$)", RegexOptions.IgnoreCase);
         if (match.Success)
         {
             teams.Add(NormalizeTeamName(match.Groups[1].Value));
             teams.Add(NormalizeTeamName(match.Groups[2].Value));
         }
-        
-        // Also handle UFC events: "UFC 325: Volkanovski vs. Lopes 2" → ["Volkanovski", "Lopes"]
+
         if (teams.Count == 0)
         {
             var ufcMatch = Regex.Match(title, @"UFC\s+\d+\s*:\s*(.+?)\s+(?:vs\.?|v\.?)\s+(.+?)(?:\s+\d+)?$", RegexOptions.IgnoreCase);
@@ -274,14 +378,10 @@ public class SmartScheduler
                 teams.Add(NormalizeTeamName(ufcMatch.Groups[2].Value));
             }
         }
-        
+
         return teams;
     }
 
-    /// <summary>
-    /// Normalizes a team name for comparison.
-    /// Removes city prefixes to match "Celtics" with "Boston Celtics".
-    /// </summary>
     private static string NormalizeTeamName(string team)
     {
         var normalized = team
@@ -289,9 +389,7 @@ public class SmartScheduler
             .ToLowerInvariant()
             .Replace(".", "")
             .Replace(",", "");
-        
-        // Remove common city prefixes for better matching
-        // "Boston Celtics" → "celtics", "Dallas Mavericks" → "mavericks"
+
         var cityPrefixes = new[] {
             "boston", "dallas", "los angeles", "la", "new york", "ny",
             "golden state", "san antonio", "oklahoma city", "portland",
@@ -307,7 +405,7 @@ public class SmartScheduler
             "real madrid", "barcelona", "atletico", "sevilla", "villarreal",
             "bayern", "borussia"
         };
-        
+
         foreach (var prefix in cityPrefixes)
         {
             if (normalized.StartsWith(prefix + " "))
@@ -320,31 +418,21 @@ public class SmartScheduler
                 }
             }
         }
-        
+
         return normalized;
     }
 
-    /// <summary>
-    /// Checks if two team lists represent the same matchup.
-    /// </summary>
     private bool TeamsMatch(List<string> teamsA, List<string> teamsB)
     {
         if (teamsA.Count < 2 || teamsB.Count < 2) return false;
-        
-        // Normalize using alias service
         var normA = teamsA.Select(t => _aliasService.ResolveAlias(t)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var normB = teamsB.Select(t => _aliasService.ResolveAlias(t)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        
         return normA.SetEquals(normB);
     }
 
-    /// <summary>
-    /// Extracts and normalizes team names from a matched program.
-    /// </summary>
     private HashSet<string> GetNormalizedTeams(MatchedProgram match)
     {
         var teams = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         if (!string.IsNullOrEmpty(match.Scored.Team1))
         {
             teams.Add(_aliasService.ResolveAlias(match.Scored.Team1));
@@ -353,16 +441,11 @@ public class SmartScheduler
         {
             teams.Add(_aliasService.ResolveAlias(match.Scored.Team2));
         }
-
         return teams;
     }
 
-    /// <summary>
-    /// Normalizes a title for comparison.
-    /// </summary>
     private static string NormalizeTitle(string title)
     {
-        // Remove common prefixes/suffixes and normalize
         return title
             .ToLowerInvariant()
             .Replace("live:", "")
@@ -372,9 +455,6 @@ public class SmartScheduler
             .Trim();
     }
 
-    /// <summary>
-    /// Calculates similarity between two strings (0-1).
-    /// </summary>
     private static double CalculateSimilarity(string a, string b)
     {
         if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
@@ -382,110 +462,23 @@ public class SmartScheduler
             return 0;
         }
 
-        // Simple word overlap similarity
         var wordsA = a.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
         var wordsB = b.Split(' ', StringSplitOptions.RemoveEmptyEntries).ToHashSet();
-
         var intersection = wordsA.Intersect(wordsB).Count();
         var union = wordsA.Union(wordsB).Count();
-
         return union > 0 ? (double)intersection / union : 0;
     }
+}
 
-    /// <summary>
-    /// Builds an optimized schedule respecting connection limits.
-    /// Checks for actual temporal overlap (accounting for full program duration)
-    /// so that non-overlapping games on different time slots are not blocked.
-    /// Accounts for existing timer windows so confirmation scans don't overfill slots.
-    /// </summary>
-    private List<ScheduledRecording> BuildSchedule(
-        List<GameGroup> sortedGames,
-        int maxConcurrent,
-        List<(DateTime Start, DateTime End)>? existingSlots = null)
-    {
-        var schedule = new List<ScheduledRecording>();
-
-        foreach (var game in sortedGames)
-        {
-            var program = game.Primary.Program;
-            var startTime = program.StartDate;
-            var endTime = program.EndDate;
-
-            // Count overlapping recordings from our NEW schedule
-            var overlappingNew = schedule
-                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
-                .ToList();
-
-            // Also count overlapping existing timers (already scheduled from previous scans)
-            var overlappingExisting = existingSlots?
-                .Count(s => s.Start < endTime && s.End > startTime) ?? 0;
-
-            var totalOverlapping = overlappingNew.Count + overlappingExisting;
-
-            if (totalOverlapping >= maxConcurrent)
-            {
-                // No capacity - check if we should preempt a lower priority NEW recording
-                // (we can't preempt existing timers, only new ones we're adding)
-                var lowestPriority = overlappingNew
-                    .OrderBy(r => r.Priority)
-                    .FirstOrDefault();
-
-                if (lowestPriority != null && lowestPriority.Priority < game.EffectivePriority)
-                {
-                    // Preempt lower priority recording
-                    _logger.LogInformation(
-                        "Preempting '{Low}' (pri {LowPri}) for '{High}' (pri {HighPri})",
-                        lowestPriority.Title,
-                        lowestPriority.Priority,
-                        program.Name,
-                        game.EffectivePriority);
-
-                    schedule.Remove(lowestPriority);
-                }
-                else
-                {
-                    // Can't schedule - log conflict
-                    _logger.LogWarning(
-                        "Cannot schedule '{Game}' at {Start}-{End} - {Count} overlapping recordings ({CountNew} new + {CountExisting} existing, max {Max} concurrent)",
-                        program.Name,
-                        startTime.ToLocalTime().ToString("g"),
-                        endTime.ToLocalTime().ToString("g"),
-                        totalOverlapping,
-                        overlappingNew.Count,
-                        overlappingExisting,
-                        maxConcurrent);
-                    continue;
-                }
-            }
-
-            // Schedule this game
-            var recording = new ScheduledRecording
-            {
-                GameGroup = game,
-                Program = program,
-                Match = game.Primary,
-                Title = program.Name ?? "Unknown",
-                StartTime = startTime,
-                EndTime = endTime,
-                Priority = game.EffectivePriority,
-                ChannelName = program.ChannelName ?? "Unknown",
-                HasBackupChannels = game.Alternates.Count > 0
-            };
-
-            schedule.Add(recording);
-
-            _logger.LogDebug(
-                "Scheduled: {Title} at {Start}-{End} on {Channel} (priority {Priority}, {Overlap} concurrent)",
-                recording.Title,
-                recording.StartTime.ToLocalTime().ToString("g"),
-                recording.EndTime.ToLocalTime().ToString("g"),
-                recording.ChannelName,
-                recording.Priority,
-                totalOverlapping + 1);
-        }
-
-        return schedule;
-    }
+/// <summary>
+/// A priority tier — all games from the same subscription.
+/// </summary>
+internal class PriorityTier
+{
+    public int SortOrder { get; set; }
+    public string SubscriptionName { get; set; } = "";
+    public SubscriptionType SubscriptionType { get; set; }
+    public List<GameGroup> Games { get; set; } = new();
 }
 
 /// <summary>
