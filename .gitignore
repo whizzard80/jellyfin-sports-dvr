@@ -30,3 +30,4 @@ recordings/
 *.xml
 !plugin/**/*.xml
 test/
+scripts/
