@@ -31,3 +31,5 @@ recordings/
 !plugin/**/*.xml
 test/
 scripts/
+samples/
+plugin/*.tar.gz

@@ -835,17 +835,30 @@ public class RecordingScheduler
                         }
                         
                         // Exclude women's sports from men's league subscriptions.
-                        // "NCAA Basketball" or "College Basketball" should NOT match "Women's College Basketball".
-                        // If the user wants women's sports, they add a separate subscription.
                         if (isMatch && IsWomensSport(title, episodeTitle))
                         {
                             var patLower = pattern.ToLowerInvariant();
-                            // Only exclude if the subscription is NOT explicitly for women's sports
                             if (!patLower.Contains("women") && !patLower.Contains("wnba") && !patLower.Contains("ncaaw"))
                             {
                                 _logger.LogDebug("Excluding '{Title}' from '{Sub}' — women's sport, subscription is not women-specific",
                                     program.Name, sub.Name);
                                 isMatch = false;
+                            }
+                        }
+
+                        // Prevent cross-competition matching within UEFA.
+                        // A "Champions League" subscription should not match Europa League or Conference League.
+                        if (isMatch)
+                        {
+                            var subNameLower = sub.Name.ToLowerInvariant();
+                            if (subNameLower.Contains("champions league") && !subNameLower.Contains("europa") && !subNameLower.Contains("conference"))
+                            {
+                                if (ContainsWholeWord(leagueContext, "europa") || ContainsWholeWord(leagueContext, "conference"))
+                                {
+                                    _logger.LogDebug("Excluding '{Title}' from '{Sub}' — different UEFA competition",
+                                        program.Name, sub.Name);
+                                    isMatch = false;
+                                }
                             }
                         }
                     }
@@ -1304,7 +1317,7 @@ public class RecordingScheduler
         else if (patternLower == "uefa")
         {
             aliases.Add("uefa champions league");
-            aliases.Add("uefa europa league");
+            aliases.Add("uefa champions league soccer");
         }
         
         // Europa League

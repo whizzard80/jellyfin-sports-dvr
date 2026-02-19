@@ -8,24 +8,22 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.SportsDVR.Services;
 
 /// <summary>
-/// Smart scheduler that builds an optimized recording schedule.
-/// 
-/// Algorithm: Priority-tier maximization.
+/// Optimal recording scheduler using priority-weighted greedy sweep with preemption.
 ///
-/// 1. Deduplicate games (same matchup on multiple channels → pick best channel).
-/// 2. Group games into PRIORITY TIERS — one tier per subscription.
-///    Within a tier, all games are equally important.
-/// 3. Process tiers from highest to lowest priority. For each tier:
-///    a. Find which time slots are still available (respecting maxConcurrent).
-///    b. Use interval scheduling (earliest-end-first) to MAXIMIZE the number
-///       of games from this tier that fit into the remaining slots.
-/// 4. Higher-priority tiers always get first pick. Lower-priority tiers fill gaps.
+/// Algorithm:
+/// 1. Deduplicate games (same matchup on multiple channels -> pick best channel).
+/// 2. Sort ALL games globally by EffectivePriority descending, then start time ascending.
+/// 3. For each game (highest priority first):
+///    a. If a concurrent slot is free at that time -> schedule it.
+///    b. If slots are full, find the LOWEST-priority recording that overlaps.
+///       If the current game outranks it -> evict it, schedule the current game.
+///    c. Otherwise -> skip (all overlapping recordings are equal/higher priority).
+/// 4. After the main pass, re-insert displaced games into any remaining gaps
+///    (processed in priority order).
 ///
-/// This means: if you have Champions League at #3 and NCAA Basketball at #14,
-/// all possible Champions League games are placed first. Then NCAA Basketball
-/// games fill whatever slots remain — and within that tier, the scheduler
-/// maximizes coverage by preferring games that end earliest (opening slots
-/// for later games).
+/// This guarantees that a priority #1 Celtics game will ALWAYS be scheduled,
+/// even if it means evicting a priority #14 NCAA Basketball game that was
+/// placed earlier in the sweep. Lower-priority games fill whatever gaps remain.
 /// </summary>
 public class SmartScheduler
 {
@@ -60,50 +58,48 @@ public class SmartScheduler
             maxConcurrent,
             existingSlots?.Count ?? 0);
 
-        // Step 1: Deduplicate — same game on multiple channels → single GameGroup
+        // Step 1: Deduplicate — same game on multiple channels -> single GameGroup
         var uniqueGames = DeduplicateGames(matches);
         _logger.LogInformation("After deduplication: {Count} unique games (from {Total} matches)", uniqueGames.Count, matches.Count);
 
-        // Step 2: Group into priority tiers by subscription SortOrder.
-        // Each subscription is its own tier. Games from the same subscription compete
-        // only against each other for "which ones maximize coverage."
-        var tiers = uniqueGames
-            .GroupBy(g => g.Primary.Subscription.SortOrder)
-            .OrderBy(g => g.Key) // SortOrder 0 = highest priority
-            .Select(g => new PriorityTier
-            {
-                SortOrder = g.Key,
-                SubscriptionName = g.First().Primary.Subscription.Name,
-                SubscriptionType = g.First().Primary.Subscription.Type,
-                Games = g.ToList()
-            })
+        // Step 2: Sort ALL games globally by priority (highest first), then start time
+        var sortedGames = uniqueGames
+            .OrderByDescending(g => g.EffectivePriority)
+            .ThenBy(g => g.Primary.Program.StartDate)
             .ToList();
 
-        _logger.LogInformation("Organized into {Count} priority tiers:", tiers.Count);
-        foreach (var tier in tiers)
+        // Log the priority breakdown
+        var bySubscription = sortedGames
+            .GroupBy(g => g.Primary.Subscription.SortOrder)
+            .OrderBy(g => g.Key);
+        _logger.LogInformation("Games by subscription priority:");
+        foreach (var group in bySubscription)
         {
+            var first = group.First();
             _logger.LogInformation(
-                "  Tier #{Sort}: {SubName} ({Type}) — {Count} games",
-                tier.SortOrder + 1,
-                tier.SubscriptionName,
-                tier.SubscriptionType,
-                tier.Games.Count);
+                "  #{Sort} {SubName} ({Type}): {Count} games, priority score {Pri}",
+                first.Primary.Subscription.SortOrder + 1,
+                first.Primary.Subscription.Name,
+                first.Primary.Subscription.Type,
+                group.Count(),
+                first.EffectivePriority);
         }
 
-        // Step 3: Build schedule tier by tier
-        var schedule = BuildScheduleByTiers(tiers, maxConcurrent, existingSlots);
+        // Step 3: Build optimal schedule with preemption
+        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots);
 
         // Step 4: Log the final schedule
         _logger.LogInformation("--- FINAL RECORDING SCHEDULE ({Count} recordings) ---", schedule.Count);
         foreach (var rec in schedule.OrderBy(r => r.StartTime))
         {
             _logger.LogInformation(
-                "  {Start} - {End} | {Title} | priority #{SortOrder} ({SubName})",
+                "  {Start} - {End} | {Title} | priority #{SortOrder} {SubName} (score {Pri})",
                 rec.StartTime.ToLocalTime().ToString("g"),
                 rec.EndTime.ToLocalTime().ToString("g"),
                 rec.Title,
                 rec.Match.Subscription.SortOrder + 1,
-                rec.Match.Subscription.Name);
+                rec.Match.Subscription.Name,
+                rec.Priority);
         }
 
         var skippedCount = uniqueGames.Count - schedule.Count;
@@ -116,76 +112,125 @@ public class SmartScheduler
     }
 
     /// <summary>
-    /// Builds the schedule tier by tier.
-    /// For each tier, uses interval scheduling to maximize the number of recordings
-    /// that fit into the remaining available slots.
+    /// Priority-weighted greedy sweep with preemption.
+    ///
+    /// Games arrive sorted by priority (highest first). Each game either:
+    /// - Gets a free slot and is scheduled immediately
+    /// - Preempts a lower-priority recording and takes its slot
+    /// - Is skipped because all overlapping slots hold equal/higher priority recordings
+    ///
+    /// Displaced recordings get a second pass to fill any remaining gaps.
     /// </summary>
-    private List<ScheduledRecording> BuildScheduleByTiers(
-        List<PriorityTier> tiers,
+    private List<ScheduledRecording> BuildOptimalSchedule(
+        List<GameGroup> sortedGames,
         int maxConcurrent,
         List<(DateTime Start, DateTime End)>? existingSlots)
     {
         var schedule = new List<ScheduledRecording>();
+        var displaced = new List<ScheduledRecording>();
 
-        // Committed time slots — starts with any existing timers from previous scans
-        var committedSlots = existingSlots?.ToList() ?? new List<(DateTime Start, DateTime End)>();
+        // Existing timer slots are immutable — we can't evict them
+        var fixedSlots = existingSlots?.ToList() ?? new List<(DateTime Start, DateTime End)>();
 
-        foreach (var tier in tiers)
+        // --- Main pass: process every game in priority order ---
+        foreach (var game in sortedGames)
         {
-            // Sort this tier's games by end time (earliest-ending first).
-            // This is the classic interval scheduling greedy algorithm:
-            // by always picking the game that ends soonest, we leave the most
-            // room for subsequent games. This maximizes total recordings.
-            var candidates = tier.Games
-                .OrderBy(g => g.Primary.Program.EndDate)
-                .ThenBy(g => g.Primary.Program.StartDate)
+            var program = game.Primary.Program;
+            var startTime = program.StartDate;
+            var endTime = program.EndDate;
+            var gamePriority = game.EffectivePriority;
+
+            // Count overlapping recordings we've scheduled
+            var overlappingScheduled = schedule
+                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
                 .ToList();
 
-            var scheduledFromTier = 0;
-            var skippedFromTier = 0;
+            // Count immutable existing timer overlaps
+            var overlappingFixed = fixedSlots
+                .Count(s => s.Start < endTime && s.End > startTime);
 
-            foreach (var game in candidates)
+            var totalOverlap = overlappingScheduled.Count + overlappingFixed;
+
+            if (totalOverlap < maxConcurrent)
             {
-                var program = game.Primary.Program;
-                var startTime = program.StartDate;
-                var endTime = program.EndDate;
+                // Free slot — schedule immediately
+                var rec = CreateRecording(game);
+                schedule.Add(rec);
 
-                // Count how many committed slots overlap this game's window
-                var overlapping = committedSlots
-                    .Count(s => s.Start < endTime && s.End > startTime);
-
-                if (overlapping < maxConcurrent)
-                {
-                    // Slot available — schedule it
-                    var rec = CreateRecording(game);
-                    schedule.Add(rec);
-                    committedSlots.Add((startTime, endTime));
-                    scheduledFromTier++;
-
-                    _logger.LogDebug(
-                        "  Tier #{Sort} scheduled: '{Title}' {Start}-{End} ({Concurrent}/{Max} concurrent)",
-                        tier.SortOrder + 1,
-                        program.Name,
-                        startTime.ToLocalTime().ToString("g"),
-                        endTime.ToLocalTime().ToString("g"),
-                        overlapping + 1,
-                        maxConcurrent);
-                }
-                else
-                {
-                    skippedFromTier++;
-                }
+                _logger.LogInformation(
+                    "SCHEDULED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
+                    program.Name,
+                    startTime.ToLocalTime().ToString("g"),
+                    endTime.ToLocalTime().ToString("g"),
+                    game.Primary.Subscription.SortOrder + 1,
+                    game.Primary.Subscription.Name,
+                    totalOverlap + 1,
+                    maxConcurrent);
+                continue;
             }
 
-            if (scheduledFromTier > 0 || skippedFromTier > 0)
+            // Slots full — can we preempt a lower-priority recording?
+            // Only our own scheduled recordings can be evicted, not fixed/existing timers.
+            var lowestOverlap = overlappingScheduled
+                .OrderBy(r => r.Priority)
+                .FirstOrDefault();
+
+            if (lowestOverlap != null && lowestOverlap.Priority < gamePriority)
             {
+                // Evict the lower-priority recording
+                schedule.Remove(lowestOverlap);
+                displaced.Add(lowestOverlap);
+
+                var rec = CreateRecording(game);
+                schedule.Add(rec);
+
                 _logger.LogInformation(
-                    "Tier #{Sort} ({SubName}): scheduled {Scheduled} of {Total} games{Skipped}",
-                    tier.SortOrder + 1,
-                    tier.SubscriptionName,
-                    scheduledFromTier,
-                    candidates.Count,
-                    skippedFromTier > 0 ? $" ({skippedFromTier} couldn't fit)" : "");
+                    "PREEMPTED: '{Evicted}' (priority #{EvSort} {EvSub}) evicted by '{Winner}' (priority #{WinSort} {WinSub})",
+                    lowestOverlap.Title,
+                    lowestOverlap.Match.Subscription.SortOrder + 1,
+                    lowestOverlap.Match.Subscription.Name,
+                    program.Name,
+                    game.Primary.Subscription.SortOrder + 1,
+                    game.Primary.Subscription.Name);
+            }
+            else
+            {
+                // All overlapping recordings are equal or higher priority — skip
+                _logger.LogDebug(
+                    "SKIPPED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}) — all {Count} slots filled by equal/higher priority",
+                    program.Name,
+                    startTime.ToLocalTime().ToString("g"),
+                    endTime.ToLocalTime().ToString("g"),
+                    game.Primary.Subscription.SortOrder + 1,
+                    game.Primary.Subscription.Name,
+                    totalOverlap);
+            }
+        }
+
+        // --- Second pass: re-insert displaced games into remaining gaps ---
+        if (displaced.Count > 0)
+        {
+            _logger.LogInformation("Re-insertion pass: {Count} displaced games looking for gaps", displaced.Count);
+
+            // Process displaced in priority order (highest first)
+            foreach (var evicted in displaced.OrderByDescending(r => r.Priority))
+            {
+                var overlappingScheduled = schedule
+                    .Count(r => r.StartTime < evicted.EndTime && r.EndTime > evicted.StartTime);
+                var overlappingFixed = fixedSlots
+                    .Count(s => s.Start < evicted.EndTime && s.End > evicted.StartTime);
+
+                if (overlappingScheduled + overlappingFixed < maxConcurrent)
+                {
+                    schedule.Add(evicted);
+                    _logger.LogInformation(
+                        "RE-INSERTED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}) into available gap",
+                        evicted.Title,
+                        evicted.StartTime.ToLocalTime().ToString("g"),
+                        evicted.EndTime.ToLocalTime().ToString("g"),
+                        evicted.Match.Subscription.SortOrder + 1,
+                        evicted.Match.Subscription.Name);
+                }
             }
         }
 
@@ -468,17 +513,6 @@ public class SmartScheduler
         var union = wordsA.Union(wordsB).Count();
         return union > 0 ? (double)intersection / union : 0;
     }
-}
-
-/// <summary>
-/// A priority tier — all games from the same subscription.
-/// </summary>
-internal class PriorityTier
-{
-    public int SortOrder { get; set; }
-    public string SubscriptionName { get; set; } = "";
-    public SubscriptionType SubscriptionType { get; set; }
-    public List<GameGroup> Games { get; set; } = new();
 }
 
 /// <summary>
