@@ -33,8 +33,10 @@ public class RecordingScheduler
     
     private readonly SemaphoreSlim _scanLock = new(1, 1);
 
-    // Teamarr regenerates daily; 24-hour lookahead is the right window.
-    private const int DEFAULT_LOOKAHEAD_HOURS = 24;
+    // Schedule for the current day only. End-of-day is 6 AM UTC next day
+    // (covers late-night games that run past midnight in US time zones).
+    // At 10 AM EST scan time, this gives ~20 hours of lookahead.
+    private const int END_OF_DAY_UTC_HOUR = 6;
     private const int DEFAULT_MAX_CONCURRENT = 2;
     
     /// <summary>
@@ -266,10 +268,9 @@ public class RecordingScheduler
                 : DEFAULT_MAX_CONCURRENT;
 
             _logger.LogInformation(
-                "FULL EPG scan for {Count} subscriptions (max {Max} concurrent, {Hours}h lookahead)",
+                "FULL EPG scan for {Count} subscriptions (max {Max} concurrent, today only)",
                 subscriptions.Count,
-                maxConcurrent,
-                DEFAULT_LOOKAHEAD_HOURS);
+                maxConcurrent);
 
             // Always do a full scan — wipe old timers and rebuild from scratch.
             // Since we scan once daily (+ startup), every scan should build the
@@ -327,7 +328,7 @@ public class RecordingScheduler
 
         // Step 2: Load today's EPG
         var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Found {Count} programs in EPG ({Hours}h lookahead)", programs.Count, DEFAULT_LOOKAHEAD_HOURS);
+        _logger.LogInformation("Found {Count} programs in EPG (today only)", programs.Count);
 
         if (programs.Count == 0)
         {
@@ -368,7 +369,6 @@ public class RecordingScheduler
             }
             catch (ArgumentException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase))
             {
-                // Shouldn't happen after a wipe, but handle gracefully
                 _logger.LogDebug("Timer already exists for '{Title}' - skipping", recording.Title);
             }
             catch (Exception ex)
@@ -403,7 +403,7 @@ public class RecordingScheduler
 
         // Step 1: Load EPG and existing timers
         var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
-        _logger.LogInformation("Found {Count} programs in EPG ({Hours}h lookahead)", programs.Count, DEFAULT_LOOKAHEAD_HOURS);
+        _logger.LogInformation("Found {Count} programs in EPG (today)", programs.Count);
 
         if (programs.Count == 0)
         {
@@ -645,7 +645,15 @@ public class RecordingScheduler
     private async Task<List<ProgramInfo>> GetUpcomingProgramsAsync(CancellationToken cancellationToken)
     {
         var result = new List<ProgramInfo>();
-        var endDate = DateTime.UtcNow.AddHours(DEFAULT_LOOKAHEAD_HOURS);
+
+        // Calculate end-of-day: next occurrence of 6 AM UTC (1 AM EST / 10 PM PST).
+        // This covers all US sports including late West Coast games.
+        var now = DateTime.UtcNow;
+        var endDate = now.Date.AddHours(END_OF_DAY_UTC_HOUR);
+        if (endDate <= now)
+        {
+            endDate = endDate.AddDays(1);
+        }
 
         try
         {
