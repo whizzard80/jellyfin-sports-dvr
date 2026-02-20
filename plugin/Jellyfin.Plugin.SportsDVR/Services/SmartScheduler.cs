@@ -45,7 +45,8 @@ public class SmartScheduler
     public List<ScheduledRecording> CreateSchedule(
         List<MatchedProgram> matches,
         int maxConcurrent,
-        List<(DateTime Start, DateTime End)>? existingSlots = null)
+        List<(DateTime Start, DateTime End)>? existingSlots = null,
+        int postPaddingSeconds = 0)
     {
         if (matches.Count == 0)
         {
@@ -86,7 +87,7 @@ public class SmartScheduler
         }
 
         // Step 3: Build optimal schedule with preemption
-        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots);
+        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots, postPaddingSeconds);
 
         // Step 4: Log the final schedule
         _logger.LogInformation("--- FINAL RECORDING SCHEDULE ({Count} recordings) ---", schedule.Count);
@@ -125,7 +126,8 @@ public class SmartScheduler
     private List<ScheduledRecording> BuildOptimalSchedule(
         List<GameGroup> sortedGames,
         int maxConcurrent,
-        List<(DateTime Start, DateTime End)>? existingSlots)
+        List<(DateTime Start, DateTime End)>? existingSlots,
+        int postPaddingSeconds)
     {
         var schedule = new List<ScheduledRecording>();
         var displaced = new List<ScheduledRecording>();
@@ -157,7 +159,7 @@ public class SmartScheduler
             if (totalOverlap < maxConcurrent)
             {
                 // Free slot — schedule immediately
-                var rec = CreateRecording(game);
+                var rec = CreateRecording(game, postPaddingSeconds);
                 schedule.Add(rec);
 
                 _logger.LogInformation(
@@ -185,7 +187,7 @@ public class SmartScheduler
                 schedule.Remove(lowestOverlap);
                 displaced.Add(lowestOverlap);
 
-                var rec = CreateRecording(game);
+                var rec = CreateRecording(game, postPaddingSeconds);
                 schedule.Add(rec);
 
                 _logger.LogInformation(
@@ -241,11 +243,10 @@ public class SmartScheduler
         return schedule;
     }
 
-    private static ScheduledRecording CreateRecording(GameGroup game)
+    private static ScheduledRecording CreateRecording(GameGroup game, int postPaddingSeconds)
     {
         var program = game.Primary.Program;
         var endTime = program.EndDate;
-        var postPaddingSeconds = GetSportPostPadding(game.Primary.Scored.DetectedLeague, program.Genres);
         var paddedEnd = endTime.AddSeconds(postPaddingSeconds);
 
         return new ScheduledRecording
@@ -261,33 +262,6 @@ public class SmartScheduler
             ChannelName = program.ChannelName ?? "Unknown",
             HasBackupChannels = game.Alternates.Count > 0
         };
-    }
-
-    /// <summary>
-    /// Returns sport-specific post-padding in seconds so the scheduler can account for
-    /// the actual tuner occupancy time (EPG end time + overtime buffer).
-    /// </summary>
-    private static int GetSportPostPadding(string? detectedLeague, string[]? genres)
-    {
-        var league = detectedLeague?.ToUpperInvariant() ?? string.Empty;
-        var genreSet = genres?.Select(g => g.ToLowerInvariant()).ToHashSet() ?? new HashSet<string>();
-
-        if (league is "MLB" or "NCAA" && genreSet.Contains("baseball"))
-            return 3600;
-        if (genreSet.Contains("baseball") || genreSet.Contains("softball"))
-            return 3600;
-        if (league is "NFL" or "NCAA" && (genreSet.Contains("football") || genreSet.Contains("college football")))
-            return 2700;
-        if (league == "CFL" || league == "XFL")
-            return 2700;
-        if (league is "NBA" or "WNBA" or "NCAA" && genreSet.Contains("basketball"))
-            return 1800;
-        if (league == "NHL")
-            return 1800;
-        if (genreSet.Contains("soccer"))
-            return 1800;
-
-        return 1800; // default 30 min
     }
 
     /// <summary>

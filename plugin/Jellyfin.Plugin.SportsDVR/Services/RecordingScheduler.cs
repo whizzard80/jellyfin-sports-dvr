@@ -346,8 +346,9 @@ public class RecordingScheduler
             return result;
         }
 
-        // Step 4: Build optimized schedule
-        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent);
+        // Step 4: Build optimized schedule (use Jellyfin's DVR padding for overlap detection)
+        var defaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
+        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent, postPaddingSeconds: defaults.PostPaddingSeconds);
 
         // Step 5: Create timers
         var scheduledCount = 0;
@@ -454,7 +455,8 @@ public class RecordingScheduler
                 .Select(t => (Start: t.StartDate, End: t.EndDate))
                 .ToList();
 
-            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent, existingSlots);
+            var dvrDefaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
+            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent, existingSlots, dvrDefaults.PostPaddingSeconds);
             foreach (var recording in schedule)
             {
                 try
@@ -1036,13 +1038,10 @@ public class RecordingScheduler
         var subscription = recording.Match.Subscription;
         var scored = recording.Match.Scored;
 
-        // Get default timer settings from Jellyfin DVR
+        // Use Jellyfin's global DVR padding settings (Dashboard > Live TV > DVR).
+        // No sport-specific overrides — let the user control padding in one place.
         var defaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
 
-        // Sport-specific post-padding — different sports have different overtime tendencies
-        var postPaddingSeconds = GetSportPostPadding(scored.DetectedLeague, program.Genres);
-
-        // Create timer info - Jellyfin's DVR will handle the actual recording
         var timerInfo = new TimerInfoDto
         {
             Name = program.Name,
@@ -1054,10 +1053,10 @@ public class RecordingScheduler
             ServiceName = program.ServiceName,
             
             PrePaddingSeconds = defaults.PrePaddingSeconds,
-            PostPaddingSeconds = Math.Max(defaults.PostPaddingSeconds, postPaddingSeconds),
+            PostPaddingSeconds = defaults.PostPaddingSeconds,
             
             IsPrePaddingRequired = defaults.IsPrePaddingRequired,
-            IsPostPaddingRequired = true,
+            IsPostPaddingRequired = defaults.IsPostPaddingRequired,
             
             // Map SortOrder (0=highest) to Jellyfin priority (higher number = higher priority)
             Priority = Math.Max(1, 100 - subscription.SortOrder)
@@ -1098,59 +1097,6 @@ public class RecordingScheduler
         }
 
         return string.Join(" | ", parts);
-    }
-
-    /// <summary>
-    /// Returns sport-specific post-padding in seconds. Different sports have vastly 
-    /// different overtime tendencies — baseball extras can add 60+ min, while soccer
-    /// rarely exceeds 15 min of stoppage time.
-    /// </summary>
-    private static int GetSportPostPadding(string? detectedLeague, string[]? genres)
-    {
-        var league = detectedLeague?.ToUpperInvariant() ?? string.Empty;
-        var genreSet = genres?.Select(g => g.ToLowerInvariant()).ToHashSet() ?? new HashSet<string>();
-
-        // Baseball — no clock, extra innings can add 60+ minutes
-        if (league is "MLB" or "NCAA" && genreSet.Contains("baseball"))
-            return 3600; // 60 min
-        if (genreSet.Contains("baseball") || genreSet.Contains("softball"))
-            return 3600;
-
-        // Football — overtime + commercial breaks, frequently runs 30-45 min over
-        if (league is "NFL" or "NCAA" && (genreSet.Contains("football") || genreSet.Contains("college football")))
-            return 2700; // 45 min
-        if (league == "CFL" || league == "XFL")
-            return 2700;
-
-        // Basketball — timeouts + overtime, usually 15-30 min over
-        if (league is "NBA" or "WNBA" or "NCAA" && genreSet.Contains("basketball"))
-            return 1800; // 30 min
-
-        // Hockey — overtime + shootout, typically 20-30 min extra
-        if (league == "NHL")
-            return 1800; // 30 min
-
-        // Soccer — very predictable, 10-15 min stoppage + penalty shootouts
-        if (league is "EPL" or "LALIGA" or "BUNDESLIGA" or "SERIEA" or "LIGUE1" or "MLS"
-            or "LIGAMX" or "CHAMPIONS LEAGUE" or "EUROPA LEAGUE" or "CONFERENCE LEAGUE")
-            return 1800; // 30 min (penalties can add up)
-        if (genreSet.Contains("soccer"))
-            return 1800;
-
-        // UFC/Boxing/MMA — fights can end early or go to decision
-        if (league is "UFC" or "MMA" or "BOXING")
-            return 1800; // 30 min
-
-        // Golf/Tennis — highly variable, but EPG usually schedules generously
-        if (league is "GOLF" or "TENNIS")
-            return 1800; // 30 min
-
-        // Motorsport — usually finishes close to scheduled time  
-        if (league is "F1" or "NASCAR" or "INDYCAR")
-            return 1800; // 30 min (weather delays)
-
-        // Default: 30 minutes (good general safety margin for any sport)
-        return 1800;
     }
 
     /// <summary>

@@ -398,18 +398,14 @@ The plugin uses multiple signals to determine if a programme is a live game broa
 - Old events with years in parentheses: "(2008)", "(2016)"
 - Placeholder programmes: "Next game: ..."
 
-### Sport-Specific Recording Padding
+### Recording Padding
 
-The plugin automatically adjusts post-recording padding based on the sport, since different sports have wildly different overtime tendencies:
+The plugin uses **Jellyfin's global DVR padding settings** (Dashboard > Live TV > DVR) for all recordings.
+Set your pre/post padding there and it applies to every scheduled recording. The "if possible" option
+is respected — Jellyfin will extend the recording only when a tuner is available.
 
-| Sport | Post-Padding | Why |
-|-------|-------------|-----|
-| Baseball (MLB, NCAA) | 60 min | No clock — extra innings can add 60+ min |
-| Football (NFL, NCAA) | 45 min | Overtime + commercial breaks |
-| Basketball (NBA, WNBA, NCAA) | 30 min | Timeouts + overtime |
-| Hockey (NHL) | 30 min | Overtime + shootout |
-| Soccer (EPL, La Liga, etc.) | 30 min | Stoppage time + penalties |
-| All others | 30 min | General safety margin |
+The scheduler accounts for the configured post-padding when checking for tuner conflicts, so it won't
+schedule a game that would overlap with another recording's padding window.
 
 ## Connection Scaling
 
