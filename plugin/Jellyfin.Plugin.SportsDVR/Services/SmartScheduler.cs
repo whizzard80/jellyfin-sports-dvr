@@ -93,9 +93,10 @@ public class SmartScheduler
         foreach (var rec in schedule.OrderBy(r => r.StartTime))
         {
             _logger.LogInformation(
-                "  {Start} - {End} | {Title} | priority #{SortOrder} {SubName} (score {Pri})",
+                "  {Start} - {End} (tuner until {Padded}) | {Title} | priority #{SortOrder} {SubName} (score {Pri})",
                 rec.StartTime.ToLocalTime().ToString("g"),
                 rec.EndTime.ToLocalTime().ToString("g"),
+                rec.PaddedEndTime.ToLocalTime().ToString("g"),
                 rec.Title,
                 rec.Match.Subscription.SortOrder + 1,
                 rec.Match.Subscription.Name,
@@ -140,9 +141,11 @@ public class SmartScheduler
             var endTime = program.EndDate;
             var gamePriority = game.EffectivePriority;
 
-            // Count overlapping recordings we've scheduled
+            // Count overlapping recordings using PADDED end times.
+            // Post-padding (30-60 min depending on sport) keeps the tuner busy
+            // past the EPG end time, so we must check against PaddedEndTime.
             var overlappingScheduled = schedule
-                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
+                .Where(r => r.StartTime < endTime && r.PaddedEndTime > startTime)
                 .ToList();
 
             // Count immutable existing timer overlaps
@@ -158,10 +161,11 @@ public class SmartScheduler
                 schedule.Add(rec);
 
                 _logger.LogInformation(
-                    "SCHEDULED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
+                    "SCHEDULED: '{Title}' {Start}-{End} (padded to {Padded}) (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
                     program.Name,
                     startTime.ToLocalTime().ToString("g"),
                     endTime.ToLocalTime().ToString("g"),
+                    rec.PaddedEndTime.ToLocalTime().ToString("g"),
                     game.Primary.Subscription.SortOrder + 1,
                     game.Primary.Subscription.Name,
                     totalOverlap + 1,
@@ -216,7 +220,7 @@ public class SmartScheduler
             foreach (var evicted in displaced.OrderByDescending(r => r.Priority))
             {
                 var overlappingScheduled = schedule
-                    .Count(r => r.StartTime < evicted.EndTime && r.EndTime > evicted.StartTime);
+                    .Count(r => r.StartTime < evicted.EndTime && r.PaddedEndTime > evicted.StartTime);
                 var overlappingFixed = fixedSlots
                     .Count(s => s.Start < evicted.EndTime && s.End > evicted.StartTime);
 
@@ -240,6 +244,10 @@ public class SmartScheduler
     private static ScheduledRecording CreateRecording(GameGroup game)
     {
         var program = game.Primary.Program;
+        var endTime = program.EndDate;
+        var postPaddingSeconds = GetSportPostPadding(game.Primary.Scored.DetectedLeague, program.Genres);
+        var paddedEnd = endTime.AddSeconds(postPaddingSeconds);
+
         return new ScheduledRecording
         {
             GameGroup = game,
@@ -247,11 +255,39 @@ public class SmartScheduler
             Match = game.Primary,
             Title = program.Name ?? "Unknown",
             StartTime = program.StartDate,
-            EndTime = program.EndDate,
+            EndTime = endTime,
+            PaddedEndTime = paddedEnd,
             Priority = game.EffectivePriority,
             ChannelName = program.ChannelName ?? "Unknown",
             HasBackupChannels = game.Alternates.Count > 0
         };
+    }
+
+    /// <summary>
+    /// Returns sport-specific post-padding in seconds so the scheduler can account for
+    /// the actual tuner occupancy time (EPG end time + overtime buffer).
+    /// </summary>
+    private static int GetSportPostPadding(string? detectedLeague, string[]? genres)
+    {
+        var league = detectedLeague?.ToUpperInvariant() ?? string.Empty;
+        var genreSet = genres?.Select(g => g.ToLowerInvariant()).ToHashSet() ?? new HashSet<string>();
+
+        if (league is "MLB" or "NCAA" && genreSet.Contains("baseball"))
+            return 3600;
+        if (genreSet.Contains("baseball") || genreSet.Contains("softball"))
+            return 3600;
+        if (league is "NFL" or "NCAA" && (genreSet.Contains("football") || genreSet.Contains("college football")))
+            return 2700;
+        if (league == "CFL" || league == "XFL")
+            return 2700;
+        if (league is "NBA" or "WNBA" or "NCAA" && genreSet.Contains("basketball"))
+            return 1800;
+        if (league == "NHL")
+            return 1800;
+        if (genreSet.Contains("soccer"))
+            return 1800;
+
+        return 1800; // default 30 min
     }
 
     /// <summary>
@@ -573,6 +609,9 @@ public class ScheduledRecording
 
     /// <summary>Gets or sets the end time.</summary>
     public DateTime EndTime { get; set; }
+
+    /// <summary>Gets or sets the padded end time (EndTime + sport-specific post-padding). Used for overlap detection.</summary>
+    public DateTime PaddedEndTime { get; set; }
 
     /// <summary>Gets or sets the priority.</summary>
     public int Priority { get; set; }
