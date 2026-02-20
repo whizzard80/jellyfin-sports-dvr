@@ -260,6 +260,21 @@ public class RecordingScheduler
         var cancelled = await CancelSportsDvrTimersAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Full scan: wiped {Count} existing Sports DVR timers", cancelled);
 
+        // Step 1b: Query remaining timers (series recordings, manual selections, etc.)
+        // so the scheduler treats those slots as occupied and won't double-book tuners.
+        var remainingTimers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
+        var externalSlots = remainingTimers
+            .Where(t => t.StartDate > DateTime.UtcNow)
+            .Select(t => (Start: t.StartDate, End: t.EndDate))
+            .ToList();
+
+        if (externalSlots.Count > 0)
+        {
+            _logger.LogInformation(
+                "Respecting {Count} existing non-plugin timers (series/manual) as fixed slots",
+                externalSlots.Count);
+        }
+
         // Step 2: Load today's EPG
         var programs = await GetUpcomingProgramsAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("Found {Count} programs in EPG (today only)", programs.Count);
@@ -286,8 +301,8 @@ public class RecordingScheduler
             return result;
         }
 
-        // Step 4: Build optimized schedule using raw EPG times
-        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent);
+        // Step 4: Build optimized schedule, reserving slots for external timers
+        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent, externalSlots);
 
         // Step 5: Create timers
         var scheduledCount = 0;
