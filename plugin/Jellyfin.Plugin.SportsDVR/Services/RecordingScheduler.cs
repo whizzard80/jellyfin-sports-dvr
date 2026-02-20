@@ -346,9 +346,8 @@ public class RecordingScheduler
             return result;
         }
 
-        // Step 4: Build optimized schedule (use Jellyfin's DVR padding for overlap detection)
-        var defaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
-        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent, postPaddingSeconds: defaults.PostPaddingSeconds);
+        // Step 4: Build optimized schedule using raw EPG times
+        var schedule = _smartScheduler.CreateSchedule(matches, maxConcurrent);
 
         // Step 5: Create timers
         var scheduledCount = 0;
@@ -455,8 +454,7 @@ public class RecordingScheduler
                 .Select(t => (Start: t.StartDate, End: t.EndDate))
                 .ToList();
 
-            var dvrDefaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
-            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent, existingSlots, dvrDefaults.PostPaddingSeconds);
+            var schedule = _smartScheduler.CreateSchedule(newMatches, maxConcurrent, existingSlots);
             foreach (var recording in schedule)
             {
                 try

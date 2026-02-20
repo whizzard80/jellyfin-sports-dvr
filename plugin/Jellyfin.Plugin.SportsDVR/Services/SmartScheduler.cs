@@ -45,8 +45,7 @@ public class SmartScheduler
     public List<ScheduledRecording> CreateSchedule(
         List<MatchedProgram> matches,
         int maxConcurrent,
-        List<(DateTime Start, DateTime End)>? existingSlots = null,
-        int postPaddingSeconds = 0)
+        List<(DateTime Start, DateTime End)>? existingSlots = null)
     {
         if (matches.Count == 0)
         {
@@ -87,17 +86,16 @@ public class SmartScheduler
         }
 
         // Step 3: Build optimal schedule with preemption
-        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots, postPaddingSeconds);
+        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots);
 
         // Step 4: Log the final schedule
         _logger.LogInformation("--- FINAL RECORDING SCHEDULE ({Count} recordings) ---", schedule.Count);
         foreach (var rec in schedule.OrderBy(r => r.StartTime))
         {
             _logger.LogInformation(
-                "  {Start} - {End} (tuner until {Padded}) | {Title} | priority #{SortOrder} {SubName} (score {Pri})",
+                "  {Start} - {End} | {Title} | priority #{SortOrder} {SubName} (score {Pri})",
                 rec.StartTime.ToLocalTime().ToString("g"),
                 rec.EndTime.ToLocalTime().ToString("g"),
-                rec.PaddedEndTime.ToLocalTime().ToString("g"),
                 rec.Title,
                 rec.Match.Subscription.SortOrder + 1,
                 rec.Match.Subscription.Name,
@@ -126,8 +124,7 @@ public class SmartScheduler
     private List<ScheduledRecording> BuildOptimalSchedule(
         List<GameGroup> sortedGames,
         int maxConcurrent,
-        List<(DateTime Start, DateTime End)>? existingSlots,
-        int postPaddingSeconds)
+        List<(DateTime Start, DateTime End)>? existingSlots)
     {
         var schedule = new List<ScheduledRecording>();
         var displaced = new List<ScheduledRecording>();
@@ -143,11 +140,10 @@ public class SmartScheduler
             var endTime = program.EndDate;
             var gamePriority = game.EffectivePriority;
 
-            // Count overlapping recordings using PADDED end times.
-            // Post-padding (30-60 min depending on sport) keeps the tuner busy
-            // past the EPG end time, so we must check against PaddedEndTime.
+            // Count overlapping recordings using raw EPG end times.
+            // Jellyfin handles padding at runtime with "if possible" logic.
             var overlappingScheduled = schedule
-                .Where(r => r.StartTime < endTime && r.PaddedEndTime > startTime)
+                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
                 .ToList();
 
             // Count immutable existing timer overlaps
@@ -159,15 +155,14 @@ public class SmartScheduler
             if (totalOverlap < maxConcurrent)
             {
                 // Free slot — schedule immediately
-                var rec = CreateRecording(game, postPaddingSeconds);
+                var rec = CreateRecording(game);
                 schedule.Add(rec);
 
                 _logger.LogInformation(
-                    "SCHEDULED: '{Title}' {Start}-{End} (padded to {Padded}) (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
+                    "SCHEDULED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
                     program.Name,
                     startTime.ToLocalTime().ToString("g"),
                     endTime.ToLocalTime().ToString("g"),
-                    rec.PaddedEndTime.ToLocalTime().ToString("g"),
                     game.Primary.Subscription.SortOrder + 1,
                     game.Primary.Subscription.Name,
                     totalOverlap + 1,
@@ -187,7 +182,7 @@ public class SmartScheduler
                 schedule.Remove(lowestOverlap);
                 displaced.Add(lowestOverlap);
 
-                var rec = CreateRecording(game, postPaddingSeconds);
+                var rec = CreateRecording(game);
                 schedule.Add(rec);
 
                 _logger.LogInformation(
@@ -222,7 +217,7 @@ public class SmartScheduler
             foreach (var evicted in displaced.OrderByDescending(r => r.Priority))
             {
                 var overlappingScheduled = schedule
-                    .Count(r => r.StartTime < evicted.EndTime && r.PaddedEndTime > evicted.StartTime);
+                    .Count(r => r.StartTime < evicted.EndTime && r.EndTime > evicted.StartTime);
                 var overlappingFixed = fixedSlots
                     .Count(s => s.Start < evicted.EndTime && s.End > evicted.StartTime);
 
@@ -243,12 +238,9 @@ public class SmartScheduler
         return schedule;
     }
 
-    private static ScheduledRecording CreateRecording(GameGroup game, int postPaddingSeconds)
+    private static ScheduledRecording CreateRecording(GameGroup game)
     {
         var program = game.Primary.Program;
-        var endTime = program.EndDate;
-        var paddedEnd = endTime.AddSeconds(postPaddingSeconds);
-
         return new ScheduledRecording
         {
             GameGroup = game,
@@ -256,8 +248,7 @@ public class SmartScheduler
             Match = game.Primary,
             Title = program.Name ?? "Unknown",
             StartTime = program.StartDate,
-            EndTime = endTime,
-            PaddedEndTime = paddedEnd,
+            EndTime = program.EndDate,
             Priority = game.EffectivePriority,
             ChannelName = program.ChannelName ?? "Unknown",
             HasBackupChannels = game.Alternates.Count > 0
@@ -583,9 +574,6 @@ public class ScheduledRecording
 
     /// <summary>Gets or sets the end time.</summary>
     public DateTime EndTime { get; set; }
-
-    /// <summary>Gets or sets the padded end time (EndTime + sport-specific post-padding). Used for overlap detection.</summary>
-    public DateTime PaddedEndTime { get; set; }
 
     /// <summary>Gets or sets the priority.</summary>
     public int Priority { get; set; }
