@@ -64,6 +64,31 @@ This plugin **only reads** the guide—it does not fetch or update EPG data. If 
 - **Dispatcharr** should regenerate the M3U/EPG (e.g. from Teamarr) on a schedule (e.g. daily or every few hours). Point Jellyfin's Live TV at Dispatcharr's EPG URL so each refresh pulls fresh data.
 - Until the guide is updated, the plugin will only see old entries and may schedule nothing or the wrong slots.
 
+### Recommended Schedule Timing
+
+The EPG data flows through a chain of services before the plugin can scan it. Each step must
+complete before the next one starts. Here's the recommended daily timing:
+
+```
+Teamarr → Dispatcharr → Jellyfin Guide Refresh → Sports DVR Scan
+```
+
+**Teamarr:**
+- Set EPG lookahead to **1 day** in EPG settings
+- Set the update cron to run before any Dispatcharr/Jellyfin scans (e.g., `0 6 * * *`)
+
+**Dispatcharr:**
+- Set provider EPG scan to every **3 hours** (can be less frequent if preferred)
+- Set Teamarr EPG update to every **1 hour**
+
+**Jellyfin (Dashboard → Scheduled Tasks):**
+- Set **"Refresh Guide"** to trigger in the AM, at least 1.25 hours before the plugin scan (e.g., 6:00 AM)
+- Set **"Scan EPG for Sports"** to at least 1 hour after the guide refresh (e.g., 7:45 AM)
+
+The guide refresh typically takes 2–5 minutes but can be longer with many channels. The gap
+ensures the guide is fully updated before the plugin scans it. If the plugin scans while the
+guide is still refreshing (or before it starts), it will find 0 programs and schedule nothing.
+
 ### Guide still shows "Game Complete" after refreshing
 
 Jellyfin has a [known bug](https://github.com/jellyfin/jellyfin/issues/6103): **"Refresh Guide Data" often does not clear the EPG cache**, so the UI keeps showing old program data even after you refresh in both Dispatcharr and Jellyfin.
