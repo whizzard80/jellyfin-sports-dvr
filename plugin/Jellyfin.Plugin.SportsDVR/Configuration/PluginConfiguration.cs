@@ -18,6 +18,7 @@ public class PluginConfiguration : BasePluginConfiguration
         MaxConcurrentRecordings = 2;
         Subscriptions = new List<Subscription>();
         CustomAliases = new List<CustomTeamAlias>();
+        ManagedTimerKeys = new List<string>();
         EnableAutoScheduling = true;
         EnableAliasMatching = true;
         DailyScanTime = "10:00";
@@ -86,6 +87,20 @@ public class PluginConfiguration : BasePluginConfiguration
     /// Default 4 = 4 AM.
     /// </summary>
     public int GuideCachePurgeHour { get; set; } = 4;
+
+    /// <summary>
+    /// Gets or sets timer keys created by the plugin (name|channel|time).
+    /// Used to track which Jellyfin timers belong to Sports DVR so we can
+    /// identify and cancel them without relying on Jellyfin's Overview field.
+    /// </summary>
+    public List<string> ManagedTimerKeys { get; set; }
+
+    /// <summary>
+    /// Gets or sets channel numbers to skip during EPG scanning.
+    /// Comma-separated, supports individual numbers and ranges.
+    /// Example: "1-150,1664,1700-1800"
+    /// </summary>
+    public string IgnoredChannels { get; set; } = string.Empty;
 }
 
 /// <summary>

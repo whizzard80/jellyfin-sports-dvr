@@ -289,7 +289,8 @@ public class SportsController : ControllerBase
             
             var now = DateTime.UtcNow;
             var cutoff48h = now.AddHours(48);
-            var today = now.Date;
+            var localNow = now.ToLocalTime();
+            var today = localNow.Date;
             var tomorrow = today.AddDays(1);
 
             // Show ALL upcoming timers (not ended yet), sorted by start time.
@@ -301,10 +302,18 @@ public class SportsController : ControllerBase
 
             var count48h = 0;
 
+            // Build managed timer key set for ownership checks
+            var managedKeys = new HashSet<string>(
+                config?.ManagedTimerKeys ?? new List<string>(),
+                StringComparer.OrdinalIgnoreCase);
+
             foreach (var timer in upcomingTimers)
             {
                 // Score the program to extract team/league info
                 var scored = _sportsScorer.Score(timer.Name ?? "", timer.ChannelName ?? "", timer.Overview ?? "");
+
+                var timerKey = BuildTimerKey(timer.Name, timer.ChannelId.ToString(), timer.StartDate);
+                var isPluginManaged = managedKeys.Contains(timerKey);
 
                 var dto = new UpcomingRecordingDto
                 {
@@ -317,9 +326,10 @@ public class SportsController : ControllerBase
                     ChannelName = timer.ChannelName ?? "Unknown",
                     StartTime = timer.StartDate,
                     EndTime = timer.EndDate,
-                    Priority = timer.Priority, // Jellyfin timer priority (higher = more important)
-                    HasBackupChannels = false, // Could be enhanced to track this
-                    IsSkipped = false
+                    Priority = timer.Priority,
+                    HasBackupChannels = false,
+                    IsSkipped = false,
+                    IsPluginManaged = isPluginManaged
                 };
 
                 // Try to find matching subscription
@@ -331,8 +341,8 @@ public class SportsController : ControllerBase
                 }
                 else
                 {
-                    dto.SubscriptionName = scored.DetectedLeague ?? "Manual";
-                    dto.SubscriptionType = "Unknown";
+                    dto.SubscriptionName = isPluginManaged ? (scored.DetectedLeague ?? "Unknown") : "Manual";
+                    dto.SubscriptionType = isPluginManaged ? "Unknown" : "Manual";
                 }
 
                 response.Scheduled.Add(dto);
@@ -343,10 +353,11 @@ public class SportsController : ControllerBase
                     count48h++;
                 }
 
-                // Count by date for summary
-                var dateKey = timer.StartDate.Date == today ? "Today" :
-                              timer.StartDate.Date == tomorrow ? "Tomorrow" :
-                              timer.StartDate.ToString("ddd, MMM d");
+                // Count by date for summary (use local time so 10 PM EST shows as "Today", not "Tomorrow")
+                var localStart = timer.StartDate.ToLocalTime();
+                var dateKey = localStart.Date == today ? "Today" :
+                              localStart.Date == tomorrow ? "Tomorrow" :
+                              localStart.ToString("ddd, MMM d");
                 
                 if (!response.SummaryByDate.ContainsKey(dateKey))
                 {
@@ -358,7 +369,7 @@ public class SportsController : ControllerBase
             response.TotalScheduled = response.Scheduled.Count;
             response.Upcoming48h = count48h;
             
-            // Calculate next daily scan time
+            // Calculate next daily scan time (scan time is server-local)
             var scanTimeStr = config?.DailyScanTime ?? "10:00";
             var parts = scanTimeStr.Split(':');
             int scanHour = 10, scanMinute = 0;
@@ -367,9 +378,9 @@ public class SportsController : ControllerBase
                 scanHour = Math.Clamp(h, 0, 23);
                 scanMinute = Math.Clamp(m, 0, 59);
             }
-            var nextScan = now.Date.AddHours(scanHour).AddMinutes(scanMinute);
-            if (nextScan <= now) nextScan = nextScan.AddDays(1);
-            response.NextScanTime = nextScan;
+            var nextScanLocal = localNow.Date.AddHours(scanHour).AddMinutes(scanMinute);
+            if (nextScanLocal <= localNow) nextScanLocal = nextScanLocal.AddDays(1);
+            response.NextScanTime = nextScanLocal.ToUniversalTime();
 
             _logger.LogInformation("Returning {Count} upcoming recordings ({Count48h} in next 48h)", response.TotalScheduled, count48h);
         }
@@ -1038,6 +1049,15 @@ public class SportsController : ControllerBase
         Plugin.Instance!.SaveConfiguration();
 
         return NoContent();
+    }
+
+    private static string BuildTimerKey(string? name, string? channelId, DateTime startDate)
+    {
+        var normalizedName = (name ?? string.Empty).ToLowerInvariant().Trim();
+        var channel = channelId ?? string.Empty;
+        var roundedTime = new DateTime(startDate.Year, startDate.Month, startDate.Day,
+            startDate.Hour, startDate.Minute, 0, DateTimeKind.Utc);
+        return $"{normalizedName}|{channel}|{roundedTime:yyyyMMddHHmm}";
     }
 }
 

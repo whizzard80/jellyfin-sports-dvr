@@ -90,105 +90,36 @@ public class RecordingScheduler
     }
 
     /// <summary>
-    /// Cancels all Jellyfin DVR timers that match any active subscription.
-    /// Uses the sports scorer to identify sports content, then checks subscription matching.
-    /// This is aggressive but correct for a daily full rebuild — we wipe everything we'd record
-    /// and rebuild from scratch with fresh EPG data.
+    /// Cancels all Jellyfin DVR timers created by Sports DVR.
+    /// Uses the internal ManagedTimerKeys registry to identify our timers.
     /// </summary>
     public async Task<int> CancelSportsDvrTimersAsync(CancellationToken cancellationToken)
     {
         var timers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
-        var subscriptions = _subscriptionManager.GetAll();
+        var managedKeys = GetManagedTimerKeys();
         var cancelledCount = 0;
 
         foreach (var timer in timers)
         {
-            // Only consider future timers (don't cancel recordings already in progress)
             if (timer.StartDate < DateTime.UtcNow) continue;
 
-            var titleLower = timer.Name?.ToLowerInvariant() ?? string.Empty;
-            var overviewLower = timer.Overview?.ToLowerInvariant() ?? string.Empty;
-            var combinedText = $"{titleLower} {overviewLower}";
+            var timerKey = BuildTimerKey(timer.Name, timer.ChannelId.ToString(), timer.StartDate);
+            if (!managedKeys.Contains(timerKey)) continue;
 
-            var isOurs = false;
-
-            // Check 1: Our signature in overview
-            if (overviewLower.Contains("subscription:"))
+            try
             {
-                isOurs = true;
+                await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
+                cancelledCount++;
+                _logger.LogInformation("Cancelled timer: {Title} at {Time}", timer.Name, timer.StartDate.ToLocalTime().ToString("g"));
             }
-
-            // Check 2: Score it as sports — if it scores high AND matches a subscription, it's ours
-            if (!isOurs)
+            catch (Exception ex)
             {
-                var scored = _sportsScorer.Score(timer.Name ?? string.Empty, null, timer.Overview, false);
-                if (scored.Score >= SportsScorer.THRESHOLD_POSSIBLE_GAME)
-                {
-                    // Check against each subscription using the same logic as FindMatchingSubscription
-                    foreach (var sub in subscriptions)
-                    {
-                        var pattern = sub.MatchPattern?.ToLowerInvariant() ?? sub.Name.ToLowerInvariant();
-
-                        switch (sub.Type)
-                        {
-                            case SubscriptionType.Team:
-                                var resolved = _aliasService.ResolveAlias(pattern).ToLowerInvariant();
-                                if (combinedText.Contains(resolved) || combinedText.Contains(pattern))
-                                {
-                                    isOurs = true;
-                                }
-                                break;
-
-                            case SubscriptionType.League:
-                                var words = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                                if (words.Length > 0 && words.All(w => ContainsWholeWord(combinedText, w)))
-                                {
-                                    isOurs = true;
-                                }
-                                if (!isOurs)
-                                {
-                                    var aliases = GetLeaguePatternAliases(pattern);
-                                    foreach (var alias in aliases)
-                                    {
-                                        if (alias == pattern) continue;
-                                        var aliasWords = alias.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                                        if (aliasWords.Length > 0 && aliasWords.All(w => ContainsWholeWord(combinedText, w)))
-                                        {
-                                            isOurs = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                break;
-
-                            case SubscriptionType.Event:
-                                if (combinedText.Contains(pattern))
-                                {
-                                    isOurs = true;
-                                }
-                                break;
-                        }
-
-                        if (isOurs) break;
-                    }
-                }
-            }
-
-            if (isOurs)
-            {
-                try
-                {
-                    await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
-                    cancelledCount++;
-                    _logger.LogInformation("Cancelled timer: {Title} at {Time}", timer.Name, timer.StartDate.ToLocalTime().ToString("g"));
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed to cancel timer '{Title}'", timer.Name);
-                }
+                _logger.LogWarning(ex, "Failed to cancel timer '{Title}'", timer.Name);
             }
         }
 
+        // Clear the registry since we just cancelled everything
+        ClearManagedTimerKeys();
         _logger.LogInformation("Cancelled {Count} Sports DVR timers", cancelledCount);
 
         return cancelledCount;
@@ -272,6 +203,9 @@ public class RecordingScheduler
                 subscriptions.Count,
                 maxConcurrent);
 
+            // Prune stale entries from the timer registry before scanning
+            await PruneManagedTimerKeysAsync(cancellationToken).ConfigureAwait(false);
+
             // Always do a full scan — wipe old timers and rebuild from scratch.
             // Since we scan once daily (+ startup), every scan should build the
             // complete optimized schedule from the full EPG.
@@ -340,6 +274,12 @@ public class RecordingScheduler
         result.MatchesFound = matches.Count;
 
         _logger.LogInformation("Found {Count} programs matching subscriptions", matches.Count);
+
+        // Log structured game list grouped by league
+        if (matches.Count > 0)
+        {
+            LogGameList(matches);
+        }
 
         if (matches.Count == 0)
         {
@@ -483,18 +423,18 @@ public class RecordingScheduler
         // Step 5: Check for stale timers (programs removed from EPG)
         var removedCount = 0;
         var now = DateTime.UtcNow;
+        var managedKeys = GetManagedTimerKeys();
         var matchedProgramKeys = new HashSet<string>(
             allMatches.Select(m => BuildTimerKey(m.Program.Name, m.Program.ChannelGuid.ToString(), m.Program.StartDate)),
             StringComparer.OrdinalIgnoreCase);
 
         foreach (var timer in existingTimers)
         {
-            // Only check future timers that we created (identified by "Subscription:" in overview)
             if (timer.StartDate < now) continue;
-            var overview = timer.Overview?.ToLowerInvariant() ?? string.Empty;
-            if (!overview.Contains("subscription:")) continue;
 
             var timerKey = BuildTimerKey(timer.Name, timer.ChannelId.ToString(), timer.StartDate);
+            if (!managedKeys.Contains(timerKey)) continue;
+
             if (!matchedProgramKeys.Contains(timerKey))
             {
                 _logger.LogWarning(
@@ -505,6 +445,7 @@ public class RecordingScheduler
                 try
                 {
                     await _liveTvManager.CancelTimer(timer.Id).ConfigureAwait(false);
+                    RemoveManagedTimerKey(timerKey);
                     removedCount++;
                 }
                 catch (Exception ex)
@@ -535,7 +476,7 @@ public class RecordingScheduler
         CancellationToken cancellationToken)
     {
         var matches = new List<MatchedProgram>();
-        var scoredCount = 0;
+        var skippedEmpty = 0;
         var noSubCount = 0;
         var excludedCount = 0;
 
@@ -543,72 +484,32 @@ public class RecordingScheduler
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Score the program - include EpisodeTitle in description for raw EPG
+            // Skip programs with no meaningful title (Teamarr filler when no game is on)
+            if (string.IsNullOrWhiteSpace(program.Name))
+            {
+                skippedEmpty++;
+                continue;
+            }
+
+            // Use scorer for metadata extraction (team names, league) — NOT as a gate
             var descWithEpisode = string.Join(" ", new[] { 
                 program.EpisodeTitle, 
                 program.Overview 
             }.Where(s => !string.IsNullOrEmpty(s)));
-            
-            // Jellyfin may not set IsSports for all XMLTV programmes (e.g. <category>Soccer</category>).
-            // Treat as sports if IsSports is true OR genres look like sports.
-            // Includes both specific sports (Soccer, Basketball) and major events (Olympics, World Cup).
-            var hasSportsCategory = program.IsSports
-                || (program.Genres != null && program.Genres.Length > 0 && program.Genres.Any(g =>
-                    string.Equals(g, "Sports", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Soccer", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Basketball", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Football", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Hockey", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Baseball", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Tennis", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Golf", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Racing", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Boxing", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "MMA", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Wrestling", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Cricket", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Rugby", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Curling", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Skiing", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(g, "Figure Skating", StringComparison.OrdinalIgnoreCase)
-                    || (g != null && g.Contains("Sports", StringComparison.OrdinalIgnoreCase))
-                    || (g != null && g.Contains("Olympic", StringComparison.OrdinalIgnoreCase))
-                    || (g != null && g.Contains("World Cup", StringComparison.OrdinalIgnoreCase))));
-            
+
             var scored = _sportsScorer.Score(
                 program.Name ?? string.Empty,
                 program.ChannelName,
                 descWithEpisode,
-                hasSportsCategory);
-
-            // Trust Teamarr's <live/> tag: if a programme is marked live, let it through
-            // to subscription matching regardless of score. This handles events like the
-            // Olympics, World Cup, and other non-matchup formats that the scorer can't
-            // detect (no "Team A at Team B" pattern).
-            if (scored.Score < SportsScorer.THRESHOLD_LIKELY_GAME)
-            {
-                if (program.IsLive)
-                {
-                    _logger.LogDebug(
-                        "Low score {Score} for '{Title}' but has <live/> tag — bypassing scorer gate (genres=[{Genres}])",
-                        scored.Score, program.Name,
-                        string.Join(", ", program.Genres ?? Array.Empty<string>()));
-                }
-                else
-                {
-                    continue;
-                }
-            }
-            scoredCount++;
+                program.IsSports);
 
             var matchedSub = FindMatchingSubscription(program, scored, subscriptions);
             if (matchedSub == null)
             {
                 noSubCount++;
-                _logger.LogInformation(
-                    "NO MATCH: '{Title}' | score={Score} | genres=[{Genres}] | episode='{Episode}' | start={Start}",
-                    program.Name, scored.Score,
-                    string.Join(", ", program.Genres ?? Array.Empty<string>()),
+                _logger.LogDebug(
+                    "NO MATCH: '{Title}' | episode='{Episode}' | start={Start}",
+                    program.Name,
                     program.EpisodeTitle, program.StartDate.ToLocalTime().ToString("g"));
                 continue;
             }
@@ -622,9 +523,8 @@ public class RecordingScheduler
             }
 
             _logger.LogInformation(
-                "MATCH: '{Title}' -> sub '{Sub}' ({SubType}) | score={Score}, genres=[{Genres}], episode='{Episode}', isLive={IsLive}",
-                program.Name, matchedSub.Name, matchedSub.Type, scored.Score,
-                string.Join(", ", program.Genres ?? Array.Empty<string>()),
+                "MATCH: '{Title}' -> sub '{Sub}' ({SubType}) | episode='{Episode}', isLive={IsLive}",
+                program.Name, matchedSub.Name, matchedSub.Type,
                 program.EpisodeTitle, program.IsLive);
 
             matches.Add(new MatchedProgram
@@ -636,15 +536,53 @@ public class RecordingScheduler
         }
 
         _logger.LogInformation(
-            "Match summary: {Scored} passed scoring, {Matched} matched subscriptions, {NoSub} no sub, {Excluded} excluded",
-            scoredCount, matches.Count, noSubCount, excludedCount);
+            "Match summary: {Total} programs scanned, {Matched} matched subscriptions, {NoSub} no sub, {Excluded} excluded, {Empty} blank titles skipped",
+            programs.Count, matches.Count, noSubCount, excludedCount, skippedEmpty);
 
         return matches;
+    }
+
+    /// <summary>
+    /// Logs a structured summary of all matched games grouped by league.
+    /// </summary>
+    private void LogGameList(List<MatchedProgram> matches)
+    {
+        _logger.LogInformation("--- TODAY'S MATCHED GAMES ---");
+
+        var byLeague = matches
+            .GroupBy(m => m.Scored.DetectedLeague ?? m.Program.EpisodeTitle ?? "Other")
+            .OrderBy(g => g.Key);
+
+        foreach (var group in byLeague)
+        {
+            _logger.LogInformation("  [{League}]", group.Key);
+            foreach (var m in group.OrderBy(g => g.Program.StartDate))
+            {
+                var hasMatchup = MatchupPattern.IsMatch(m.Program.Name ?? "");
+                var type = hasMatchup ? "Game" : "Event";
+                var teams = !string.IsNullOrEmpty(m.Scored.Team1) && !string.IsNullOrEmpty(m.Scored.Team2)
+                    ? $"{m.Scored.Team1} vs {m.Scored.Team2}"
+                    : m.Program.Name ?? "Unknown";
+
+                _logger.LogInformation(
+                    "    {Time} | {Type} | {Teams} | ch:{Channel} | sub:#{Sort} {SubName}",
+                    m.Program.StartDate.ToLocalTime().ToString("g"),
+                    type,
+                    teams,
+                    m.Program.ChannelName,
+                    m.Subscription.SortOrder + 1,
+                    m.Subscription.Name);
+            }
+        }
+
+        _logger.LogInformation("--- END GAME LIST ({Count} total) ---", matches.Count);
     }
 
     private async Task<List<ProgramInfo>> GetUpcomingProgramsAsync(CancellationToken cancellationToken)
     {
         var result = new List<ProgramInfo>();
+        var config = Plugin.Instance?.Configuration;
+        var ignoredChannels = config?.IgnoredChannels ?? string.Empty;
 
         // Calculate end-of-day: next occurrence of 6 AM UTC (1 AM EST / 10 PM PST).
         // This covers all US sports including late West Coast games.
@@ -657,16 +595,24 @@ public class RecordingScheduler
 
         try
         {
-            // Get all Live TV channels — use DtoOptions(true) to ensure all fields
-            // (Genres, IsLive, IsSports, etc.) are populated on returned BaseItem objects.
             var channelQuery = new LiveTvChannelQuery { };
             var dtoOptions = new DtoOptions(true);
             var channels = _liveTvManager.GetInternalChannels(channelQuery, dtoOptions, cancellationToken);
 
+            var ignoredCount = 0;
             _logger.LogDebug("Scanning {Count} Live TV channels", channels.Items.Count);
 
             foreach (var channel in channels.Items)
             {
+                // Skip channels on the ignore list
+                var ltvChannel = channel as MediaBrowser.Controller.LiveTv.LiveTvChannel;
+                var channelNumber = ltvChannel?.Number;
+                if (IsChannelIgnored(channelNumber, ignoredChannels))
+                {
+                    ignoredCount++;
+                    continue;
+                }
+
                 try
                 {
                     // Only retrieve future programs — never schedule games already in progress.
@@ -712,6 +658,10 @@ public class RecordingScheduler
                 {
                     _logger.LogWarning(ex, "Failed to get programs for channel {Channel}", channel.Name);
                 }
+            }
+            if (ignoredCount > 0)
+            {
+                _logger.LogInformation("Skipped {Count} ignored channels", ignoredCount);
             }
         }
         catch (Exception ex)
@@ -762,33 +712,33 @@ public class RecordingScheduler
             switch (sub.Type)
             {
                 case SubscriptionType.Team:
-                    // Resolve alias for the subscription pattern (also lowercase for comparison)
                     var resolvedPattern = _aliasService.ResolveAlias(pattern).ToLowerInvariant();
                     
-                    // Check if pattern appears in title/description (case-insensitive)
-                    if (combinedText.Contains(resolvedPattern, StringComparison.OrdinalIgnoreCase) ||
-                        combinedText.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                    // Check if the full pattern appears as a whole word in the combined text
+                    if (ContainsWholeWord(combinedText, resolvedPattern) ||
+                        ContainsWholeWord(combinedText, pattern))
                     {
                         isMatch = true;
                         _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via pattern '{Pattern}'",
                             program.Name, sub.Name, pattern);
                     }
-                    // Also check against extracted team names
-                    else if (!string.IsNullOrEmpty(scored.Team1) || !string.IsNullOrEmpty(scored.Team2))
+                    // Check extracted team names using whole-word matching
+                    else if (!string.IsNullOrEmpty(scored.Team1) && !string.IsNullOrEmpty(scored.Team2))
                     {
-                        var team1 = _aliasService.ResolveAlias(scored.Team1?.ToLowerInvariant() ?? string.Empty).ToLowerInvariant();
-                        var team2 = _aliasService.ResolveAlias(scored.Team2?.ToLowerInvariant() ?? string.Empty).ToLowerInvariant();
+                        var team1 = _aliasService.ResolveAlias(scored.Team1.ToLowerInvariant()).ToLowerInvariant();
+                        var team2 = _aliasService.ResolveAlias(scored.Team2.ToLowerInvariant()).ToLowerInvariant();
                         
-                        if (team1.Contains(resolvedPattern, StringComparison.OrdinalIgnoreCase) || 
-                            team2.Contains(resolvedPattern, StringComparison.OrdinalIgnoreCase) ||
-                            resolvedPattern.Contains(team1, StringComparison.OrdinalIgnoreCase) || 
-                            resolvedPattern.Contains(team2, StringComparison.OrdinalIgnoreCase) ||
-                            team1.Contains(pattern, StringComparison.OrdinalIgnoreCase) ||
-                            team2.Contains(pattern, StringComparison.OrdinalIgnoreCase))
+                        if (!string.IsNullOrEmpty(team1) && !string.IsNullOrEmpty(team2))
                         {
-                            isMatch = true;
-                            _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via team extraction",
-                                program.Name, sub.Name);
+                            if (ContainsWholeWord(team1, resolvedPattern) || 
+                                ContainsWholeWord(team2, resolvedPattern) ||
+                                ContainsWholeWord(team1, pattern) ||
+                                ContainsWholeWord(team2, pattern))
+                            {
+                                isMatch = true;
+                                _logger.LogDebug("Matched '{Title}' to subscription '{Sub}' via team extraction (teams: {Team1} vs {Team2})",
+                                    program.Name, sub.Name, team1, team2);
+                            }
                         }
                     }
                     break;
@@ -1034,16 +984,13 @@ public class RecordingScheduler
     {
         var program = recording.Program;
         var subscription = recording.Match.Subscription;
-        var scored = recording.Match.Scored;
 
-        // Use Jellyfin's global DVR padding settings (Dashboard > Live TV > DVR).
-        // No sport-specific overrides — let the user control padding in one place.
         var defaults = await _liveTvManager.GetNewTimerDefaults(cancellationToken).ConfigureAwait(false);
 
         var timerInfo = new TimerInfoDto
         {
             Name = program.Name,
-            Overview = BuildRecordingDescription(recording),
+            Overview = program.Overview,
             ChannelId = program.ChannelGuid,
             ProgramId = program.Id,
             StartDate = program.StartDate,
@@ -1056,45 +1003,119 @@ public class RecordingScheduler
             IsPrePaddingRequired = defaults.IsPrePaddingRequired,
             IsPostPaddingRequired = defaults.IsPostPaddingRequired,
             
-            // Map SortOrder (0=highest) to Jellyfin priority (higher number = higher priority)
             Priority = Math.Max(1, 100 - subscription.SortOrder)
         };
 
-        // Create the timer via Jellyfin's Live TV manager
         await _liveTvManager.CreateTimer(timerInfo, cancellationToken).ConfigureAwait(false);
+
+        // Register the timer key so we can identify it as ours later
+        var timerKey = BuildTimerKey(program.Name, program.ChannelGuid.ToString(), program.StartDate);
+        AddManagedTimerKey(timerKey);
     }
 
-    private static string BuildRecordingDescription(ScheduledRecording recording)
+    // --- Managed timer key registry (persisted in plugin config) ---
+
+    private HashSet<string> GetManagedTimerKeys()
     {
-        var program = recording.Program;
-        var scored = recording.Match.Scored;
-        var subscription = recording.Match.Subscription;
-        var parts = new List<string>();
-        
-        if (!string.IsNullOrEmpty(scored.DetectedLeague))
-        {
-            parts.Add($"League: {scored.DetectedLeague}");
-        }
-        
-        if (!string.IsNullOrEmpty(scored.Team1) && !string.IsNullOrEmpty(scored.Team2))
-        {
-            parts.Add($"Matchup: {scored.Team1} vs {scored.Team2}");
-        }
-        
-        parts.Add($"Subscription: {subscription.Name} ({subscription.Type})");
-        parts.Add($"Priority: #{subscription.SortOrder + 1}");
+        var config = Plugin.Instance?.Configuration;
+        if (config?.ManagedTimerKeys == null) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return new HashSet<string>(config.ManagedTimerKeys, StringComparer.OrdinalIgnoreCase);
+    }
 
-        if (recording.HasBackupChannels)
+    private void AddManagedTimerKey(string key)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config == null) return;
+        config.ManagedTimerKeys ??= new List<string>();
+        if (!config.ManagedTimerKeys.Contains(key, StringComparer.OrdinalIgnoreCase))
         {
-            parts.Add($"Backup channels available");
+            config.ManagedTimerKeys.Add(key);
+            Plugin.Instance!.SaveConfiguration();
+        }
+    }
+
+    private void RemoveManagedTimerKey(string key)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config?.ManagedTimerKeys == null) return;
+        var removed = config.ManagedTimerKeys.RemoveAll(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase));
+        if (removed > 0)
+        {
+            Plugin.Instance!.SaveConfiguration();
+        }
+    }
+
+    private void ClearManagedTimerKeys()
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config == null) return;
+        config.ManagedTimerKeys = new List<string>();
+        Plugin.Instance!.SaveConfiguration();
+    }
+
+    /// <summary>
+    /// Remove registry entries for timers that no longer exist in Jellyfin
+    /// (past events, manually cancelled by user, etc.).
+    /// </summary>
+    private async Task PruneManagedTimerKeysAsync(CancellationToken cancellationToken)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config?.ManagedTimerKeys == null || config.ManagedTimerKeys.Count == 0) return;
+
+        var timers = await GetExistingTimersAsync(cancellationToken).ConfigureAwait(false);
+        var activeKeys = new HashSet<string>(
+            timers.Select(t => BuildTimerKey(t.Name, t.ChannelId.ToString(), t.StartDate)),
+            StringComparer.OrdinalIgnoreCase);
+
+        var before = config.ManagedTimerKeys.Count;
+        config.ManagedTimerKeys.RemoveAll(k => !activeKeys.Contains(k));
+        var pruned = before - config.ManagedTimerKeys.Count;
+
+        if (pruned > 0)
+        {
+            Plugin.Instance!.SaveConfiguration();
+            _logger.LogInformation("Pruned {Count} stale entries from managed timer registry", pruned);
+        }
+    }
+
+    // --- Channel ignore list ---
+
+    /// <summary>
+    /// Checks if a channel number should be skipped based on the ignore list config.
+    /// Supports individual numbers ("1664") and ranges ("1-150").
+    /// </summary>
+    private static bool IsChannelIgnored(string? channelNumber, string? ignoredConfig)
+    {
+        if (string.IsNullOrWhiteSpace(channelNumber) || string.IsNullOrWhiteSpace(ignoredConfig))
+            return false;
+
+        if (!int.TryParse(channelNumber, out var chNum))
+            return false;
+
+        foreach (var part in ignoredConfig.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var dashIndex = part.IndexOf('-');
+            if (dashIndex > 0 && dashIndex < part.Length - 1)
+            {
+                // Range: "1-150"
+                if (int.TryParse(part[..dashIndex], out var lo) &&
+                    int.TryParse(part[(dashIndex + 1)..], out var hi) &&
+                    chNum >= lo && chNum <= hi)
+                {
+                    return true;
+                }
+            }
+            else
+            {
+                // Single number: "1664"
+                if (int.TryParse(part, out var single) && chNum == single)
+                {
+                    return true;
+                }
+            }
         }
 
-        if (!string.IsNullOrEmpty(program.Overview))
-        {
-            parts.Add(program.Overview);
-        }
-
-        return string.Join(" | ", parts);
+        return false;
     }
 
     /// <summary>

@@ -62,14 +62,8 @@ public class SmartScheduler
         var uniqueGames = DeduplicateGames(matches);
         _logger.LogInformation("After deduplication: {Count} unique games (from {Total} matches)", uniqueGames.Count, matches.Count);
 
-        // Step 2: Sort ALL games globally by priority (highest first), then start time
-        var sortedGames = uniqueGames
-            .OrderByDescending(g => g.EffectivePriority)
-            .ThenBy(g => g.Primary.Program.StartDate)
-            .ToList();
-
         // Log the priority breakdown
-        var bySubscription = sortedGames
+        var bySubscription = uniqueGames
             .GroupBy(g => g.Primary.Subscription.SortOrder)
             .OrderBy(g => g.Key);
         _logger.LogInformation("Games by subscription priority:");
@@ -85,8 +79,8 @@ public class SmartScheduler
                 first.EffectivePriority);
         }
 
-        // Step 3: Build optimal schedule with preemption
-        var schedule = BuildOptimalSchedule(sortedGames, maxConcurrent, existingSlots);
+        // Step 2: Build optimal schedule with preemption (chronological sweep)
+        var schedule = BuildOptimalSchedule(uniqueGames, maxConcurrent, existingSlots);
 
         // Step 4: Log the final schedule
         _logger.LogInformation("--- FINAL RECORDING SCHEDULE ({Count} recordings) ---", schedule.Count);
@@ -122,120 +116,99 @@ public class SmartScheduler
     /// Displaced recordings get a second pass to fill any remaining gaps.
     /// </summary>
     private List<ScheduledRecording> BuildOptimalSchedule(
-        List<GameGroup> sortedGames,
+        List<GameGroup> games,
         int maxConcurrent,
         List<(DateTime Start, DateTime End)>? existingSlots)
     {
-        var schedule = new List<ScheduledRecording>();
-        var displaced = new List<ScheduledRecording>();
+        // Sort chronologically, break ties by priority desc, then shortest end first
+        var sorted = games
+            .OrderBy(g => g.Primary.Program.StartDate)
+            .ThenByDescending(g => g.EffectivePriority)
+            .ThenBy(g => g.Primary.Program.EndDate)
+            .ToList();
 
-        // Existing timer slots are immutable — we can't evict them
         var fixedSlots = existingSlots?.ToList() ?? new List<(DateTime Start, DateTime End)>();
+        var active = new List<ScheduledRecording>(); // overlapping with current time in sweep
+        var result = new List<ScheduledRecording>(); // all committed recordings
 
-        // --- Main pass: process every game in priority order ---
-        foreach (var game in sortedGames)
+        foreach (var game in sorted)
         {
-            var program = game.Primary.Program;
-            var startTime = program.StartDate;
-            var endTime = program.EndDate;
-            var gamePriority = game.EffectivePriority;
+            var start = game.Primary.Program.StartDate;
+            var end = game.Primary.Program.EndDate;
+            var priority = game.EffectivePriority;
 
-            // Count overlapping recordings using raw EPG end times.
-            // Jellyfin handles padding at runtime with "if possible" logic.
-            var overlappingScheduled = schedule
-                .Where(r => r.StartTime < endTime && r.EndTime > startTime)
-                .ToList();
+            // Drop any active recordings that have ended
+            active.RemoveAll(r => r.EndTime <= start);
 
-            // Count immutable existing timer overlaps
-            var overlappingFixed = fixedSlots
-                .Count(s => s.Start < endTime && s.End > startTime);
+            // Count overlaps including fixed slots
+            var overlappingActive = active.Count(r => r.StartTime < end && r.EndTime > start);
+            var overlappingFixed = fixedSlots.Count(s => s.Start < end && s.End > start);
+            var totalOverlap = overlappingActive + overlappingFixed;
 
-            var totalOverlap = overlappingScheduled.Count + overlappingFixed;
+            _logger.LogDebug("CONSIDER: '{Title}' {Start}-{End} prio={Pri} activeOverlap={Act} fixedOverlap={Fix}",
+                game.Primary.Program.Name,
+                start.ToLocalTime().ToString("g"),
+                end.ToLocalTime().ToString("g"),
+                priority,
+                overlappingActive,
+                overlappingFixed);
 
             if (totalOverlap < maxConcurrent)
             {
-                // Free slot — schedule immediately
                 var rec = CreateRecording(game);
-                schedule.Add(rec);
-
+                active.Add(rec);
+                result.Add(rec);
                 _logger.LogInformation(
                     "SCHEDULED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}, {Used}/{Max} concurrent)",
-                    program.Name,
-                    startTime.ToLocalTime().ToString("g"),
-                    endTime.ToLocalTime().ToString("g"),
+                    game.Primary.Program.Name,
+                    start.ToLocalTime().ToString("g"),
+                    end.ToLocalTime().ToString("g"),
                     game.Primary.Subscription.SortOrder + 1,
                     game.Primary.Subscription.Name,
                     totalOverlap + 1,
                     maxConcurrent);
+                _logger.LogDebug("DECISION: scheduled '{Title}' (free slot, {Used}/{Max})",
+                    game.Primary.Program.Name, totalOverlap + 1, maxConcurrent);
                 continue;
             }
 
-            // Slots full — can we preempt a lower-priority recording?
-            // Only our own scheduled recordings can be evicted, not fixed/existing timers.
-            var lowestOverlap = overlappingScheduled
+            // Slots full: find lowest-priority active that overlaps
+            var lowest = active
+                .Where(r => r.StartTime < end && r.EndTime > start)
                 .OrderBy(r => r.Priority)
+                .ThenByDescending(r => r.EndTime)
                 .FirstOrDefault();
 
-            if (lowestOverlap != null && lowestOverlap.Priority < gamePriority)
+            if (lowest != null && lowest.Priority < priority && overlappingFixed < maxConcurrent)
             {
-                // Evict the lower-priority recording
-                schedule.Remove(lowestOverlap);
-                displaced.Add(lowestOverlap);
+                active.Remove(lowest);
+                result.Remove(lowest);
 
                 var rec = CreateRecording(game);
-                schedule.Add(rec);
+                active.Add(rec);
+                result.Add(rec);
 
                 _logger.LogInformation(
                     "PREEMPTED: '{Evicted}' (priority #{EvSort} {EvSub}) evicted by '{Winner}' (priority #{WinSort} {WinSub})",
-                    lowestOverlap.Title,
-                    lowestOverlap.Match.Subscription.SortOrder + 1,
-                    lowestOverlap.Match.Subscription.Name,
-                    program.Name,
+                    lowest.Title,
+                    lowest.Match.Subscription.SortOrder + 1,
+                    lowest.Match.Subscription.Name,
+                    game.Primary.Program.Name,
                     game.Primary.Subscription.SortOrder + 1,
                     game.Primary.Subscription.Name);
+                _logger.LogDebug("DECISION: preempted '{Evicted}' (prio {EvPri}) with '{Winner}' (prio {WinPri})",
+                    lowest.Title, lowest.Priority,
+                    game.Primary.Program.Name, priority);
             }
             else
             {
-                // All overlapping recordings are equal or higher priority — skip
-                _logger.LogDebug(
-                    "SKIPPED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}) — all {Count} slots filled by equal/higher priority",
-                    program.Name,
-                    startTime.ToLocalTime().ToString("g"),
-                    endTime.ToLocalTime().ToString("g"),
-                    game.Primary.Subscription.SortOrder + 1,
-                    game.Primary.Subscription.Name,
-                    totalOverlap);
+                _logger.LogDebug("DECISION: skipped '{Title}' prio={Pri} (all {Count} overlaps equal/higher or fixed slots block)",
+                    game.Primary.Program.Name, priority, totalOverlap);
             }
         }
 
-        // --- Second pass: re-insert displaced games into remaining gaps ---
-        if (displaced.Count > 0)
-        {
-            _logger.LogInformation("Re-insertion pass: {Count} displaced games looking for gaps", displaced.Count);
-
-            // Process displaced in priority order (highest first)
-            foreach (var evicted in displaced.OrderByDescending(r => r.Priority))
-            {
-                var overlappingScheduled = schedule
-                    .Count(r => r.StartTime < evicted.EndTime && r.EndTime > evicted.StartTime);
-                var overlappingFixed = fixedSlots
-                    .Count(s => s.Start < evicted.EndTime && s.End > evicted.StartTime);
-
-                if (overlappingScheduled + overlappingFixed < maxConcurrent)
-                {
-                    schedule.Add(evicted);
-                    _logger.LogInformation(
-                        "RE-INSERTED: '{Title}' {Start}-{End} (priority #{Sort} {Sub}) into available gap",
-                        evicted.Title,
-                        evicted.StartTime.ToLocalTime().ToString("g"),
-                        evicted.EndTime.ToLocalTime().ToString("g"),
-                        evicted.Match.Subscription.SortOrder + 1,
-                        evicted.Match.Subscription.Name);
-                }
-            }
-        }
-
-        return schedule;
+        // Sort result by start for stable output
+        return result.OrderBy(r => r.StartTime).ToList();
     }
 
     private static ScheduledRecording CreateRecording(GameGroup game)

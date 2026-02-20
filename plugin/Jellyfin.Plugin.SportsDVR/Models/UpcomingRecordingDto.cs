@@ -78,6 +78,11 @@ public class UpcomingRecordingDto
     public int BackupChannelCount { get; set; }
 
     /// <summary>
+    /// Gets or sets whether this timer was created by Sports DVR (vs manually in Jellyfin).
+    /// </summary>
+    public bool IsPluginManaged { get; set; }
+
+    /// <summary>
     /// Gets or sets whether this recording was skipped due to conflicts.
     /// </summary>
     public bool IsSkipped { get; set; }

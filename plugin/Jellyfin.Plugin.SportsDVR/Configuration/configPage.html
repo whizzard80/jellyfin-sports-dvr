@@ -67,7 +67,7 @@
                             <strong>Scan EPG Now:</strong> Immediately scan the guide for matching programs and schedule recordings.<br>
                             <strong>Clear Schedule Cache:</strong> Reset the plugin's internal tracking (use after changing tuner/EPG).<br>
                             <strong>Purge Guide Cache:</strong> Clear Jellyfin's stale EPG cache and trigger a fresh guide refresh. Use this if the guide shows yesterday's data or &quot;Game Complete.&quot;<br>
-                            <strong>Clear Recording Schedule:</strong> Cancel Sports DVR timers (ones with our stamp). Use to wipe and rebuild the schedule.<br>
+                            <strong>Clear Recording Schedule:</strong> Cancel timers created by Sports DVR. Manually-added timers are left untouched.<br>
                             <strong>Clear ALL Timers:</strong> <span style="color: #ef9a9a;">Nuclear option.</span> Cancel EVERY scheduled recording in Jellyfin — use to clean up orphaned timers from old plugin versions.
                         </div>
                         <div id="actionStatus" class="fieldDescription" style="margin-top: 0.5em; display: none;"></div>
@@ -170,6 +170,12 @@
                                 <option value="23">11 PM</option>
                             </select>
                             <div class="fieldDescription">Server local time. Purge runs when the EPG scan task runs during this hour.</div>
+                        </div>
+
+                        <div class="inputContainer">
+                            <label class="inputLabel" for="ignoredChannels">Ignored Channels</label>
+                            <input type="text" id="ignoredChannels" placeholder="e.g. 1-150,1664,1700-1800" is="emby-input">
+                            <div class="fieldDescription">Channel numbers to skip during EPG scanning. Supports individual numbers and ranges, comma-separated. Leave empty to scan all channels.</div>
                         </div>
                         
                     </fieldset>
@@ -598,6 +604,7 @@
                         document.getElementById('enableDailyGuideCachePurge').checked = config.EnableDailyGuideCachePurge !== false;
                         var purgeHour = Math.min(23, Math.max(0, parseInt(config.GuideCachePurgeHour, 10) || 4));
                         document.getElementById('guideCachePurgeHour').value = String(purgeHour);
+                        document.getElementById('ignoredChannels').value = config.IgnoredChannels || '';
                     } catch (e) {
                         console.error('Failed to load settings:', e);
                     }
@@ -614,6 +621,7 @@
                         config.EnableAliasMatching = document.getElementById('enableAliasMatching').checked;
                         config.EnableDailyGuideCachePurge = document.getElementById('enableDailyGuideCachePurge').checked;
                         config.GuideCachePurgeHour = parseInt(document.getElementById('guideCachePurgeHour').value, 10) || 4;
+                        config.IgnoredChannels = document.getElementById('ignoredChannels').value || '';
                         
                         await ApiClient.updatePluginConfiguration('a1b2c3d4-e5f6-7890-abcd-ef1234567890', config);
                         Dashboard.alert('Settings saved!');
@@ -1455,10 +1463,13 @@
                                 title = rec.Team1 + ' vs ' + rec.Team2;
                             }
                             
-                            html += '<div class="listItem listItem-border upcoming-item">' +
+                            var manualStyle = rec.IsPluginManaged ? '' : ' opacity: 0.6; border-left: 3px solid #ff9800;';
+                            var manualBadge = rec.IsPluginManaged ? '' : '<span style="background: #ff9800; padding: 2px 6px; border-radius: 3px; font-size: 0.75em; margin-left: 0.5em;" title="Not created by Sports DVR — Clear Schedule won\'t remove this">Manual</span>';
+
+                            html += '<div class="listItem listItem-border upcoming-item" style="' + manualStyle + '">' +
                                 '<div style="width: 60px; text-align: center; color: #888; font-size: 0.9em;">' + timeStr + '</div>' +
                                 '<div class="listItemBody two-line" style="flex: 1;">' +
-                                '<div class="listItemBodyText">' + this.escapeHtml(title) + '</div>' +
+                                '<div class="listItemBodyText">' + this.escapeHtml(title) + manualBadge + '</div>' +
                                 '<div class="listItemBodyText secondary">' +
                                 '<span style="background: ' + badgeColor + '; padding: 2px 6px; border-radius: 3px; font-size: 0.8em; margin-right: 0.5em;">' + this.escapeHtml(rec.League || 'Sports') + '</span>' +
                                 this.escapeHtml(rec.ChannelName) +
